@@ -1,0 +1,21 @@
+[package]
+name = "systrace-gui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "systrace-gui"
+path = "src/main.rs"
+
+[dependencies]
+systrace-core = { path = "../systrace-core" }
+eframe = "0.31"
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["all_loaders"] }
+rfd = "0.15"
+clap = { version = "4", features = ["derive"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+crossbeam-channel = { workspace = true }
+chrono = { workspace = true }
