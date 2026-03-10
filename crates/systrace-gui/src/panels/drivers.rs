@@ -8,35 +8,24 @@ use super::{cmp_ord, fmt_time, make_headers, render_empty, TabState};
 // Row type
 // ---------------------------------------------------------------------------
 
-struct FileRow {
+struct DriverRow {
     time: Timestamp,
-    action: &'static str,
-    filename: String,
-    hashes: String,
+    kind: &'static str, // "Driver" or "Image"
+    image_loaded: String,
+    signature: String,
+    signature_status: String,
 }
 
-impl FileRow {
+impl DriverRow {
     fn copy_text(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}",
             fmt_time(self.time),
-            self.action,
-            self.filename,
-            self.hashes,
+            self.kind,
+            self.image_loaded,
+            self.signature,
+            self.signature_status,
         )
-    }
-}
-
-fn action_for_id(event_id: u16) -> &'static str {
-    match event_id {
-        11 => "Create",
-        15 => "ADS Stream",
-        23 => "Delete",
-        26 => "Delete Detected",
-        27 => "Block Exec",
-        28 => "Block Shred",
-        29 => "Exec Detected",
-        _  => "Unknown",
     }
 }
 
@@ -44,49 +33,42 @@ fn action_for_id(event_id: u16) -> &'static str {
 // Public render function
 // ---------------------------------------------------------------------------
 
-pub fn render_file_activity(
+pub fn render_drivers(
     ui: &mut egui::Ui,
     event_store: &EventStore,
     guid: ProcessGuid,
     tab: &mut TabState,
     filter: &str,
 ) {
-    let indices = event_store.events_for_process_and_types(&guid, &[11, 15, 23, 26, 27, 28, 29]);
+    let indices = event_store.events_for_process_and_types(&guid, &[6, 7]);
     if indices.is_empty() {
-        render_empty(ui, "No file activity events for this process.");
+        render_empty(ui, "No driver/module load events for this process.");
         return;
     }
 
-    let mut rows: Vec<FileRow> = indices
+    let mut rows: Vec<DriverRow> = indices
         .iter()
         .filter_map(|&i| {
             let ev = &event_store.events[i];
-            let action = action_for_id(ev.event_id);
             match &ev.detail {
-                EventDetail::FileCreate { target_filename, .. } => Some(FileRow {
-                    time: ev.time_created,
-                    action,
-                    filename: target_filename.clone().unwrap_or_default(),
-                    hashes: String::new(),
-                }),
-                EventDetail::FileCreateStreamHash { target_filename, hash, .. } => Some(FileRow {
-                    time: ev.time_created,
-                    action,
-                    filename: target_filename.clone().unwrap_or_default(),
-                    hashes: hash.clone().unwrap_or_default(),
-                }),
-                EventDetail::FileDeleteEvent { target_filename, hashes, .. } => Some(FileRow {
-                    time: ev.time_created,
-                    action,
-                    filename: target_filename.clone().unwrap_or_default(),
-                    hashes: hashes.clone().unwrap_or_default(),
-                }),
-                EventDetail::FileCreateTime { target_filename, .. } => Some(FileRow {
-                    time: ev.time_created,
-                    action: "Timestomp",
-                    filename: target_filename.clone().unwrap_or_default(),
-                    hashes: String::new(),
-                }),
+                EventDetail::DriverLoad { image_loaded, signature, signature_status, .. } => {
+                    Some(DriverRow {
+                        time: ev.time_created,
+                        kind: "Driver",
+                        image_loaded: image_loaded.clone().unwrap_or_default(),
+                        signature: signature.clone().unwrap_or_default(),
+                        signature_status: signature_status.clone().unwrap_or_default(),
+                    })
+                }
+                EventDetail::ImageLoad { image_loaded, signature, signature_status, .. } => {
+                    Some(DriverRow {
+                        time: ev.time_created,
+                        kind: "Image",
+                        image_loaded: image_loaded.clone().unwrap_or_default(),
+                        signature: signature.clone().unwrap_or_default(),
+                        signature_status: signature_status.clone().unwrap_or_default(),
+                    })
+                }
                 _ => None,
             }
         })
@@ -105,14 +87,18 @@ pub fn render_file_activity(
     let sort_asc = tab.sort.ascending;
     match sort_col {
         0 => rows.sort_by(|a, b| cmp_ord(a.time.cmp(&b.time), sort_asc)),
-        1 => rows.sort_by(|a, b| cmp_ord(a.action.cmp(b.action), sort_asc)),
-        2 => rows.sort_by(|a, b| cmp_ord(a.filename.cmp(&b.filename), sort_asc)),
-        3 => rows.sort_by(|a, b| cmp_ord(a.hashes.cmp(&b.hashes), sort_asc)),
+        1 => rows.sort_by(|a, b| cmp_ord(a.kind.cmp(b.kind), sort_asc)),
+        2 => rows.sort_by(|a, b| cmp_ord(a.image_loaded.cmp(&b.image_loaded), sort_asc)),
+        3 => rows.sort_by(|a, b| cmp_ord(a.signature.cmp(&b.signature), sort_asc)),
+        4 => rows.sort_by(|a, b| cmp_ord(a.signature_status.cmp(&b.signature_status), sort_asc)),
         _ => {}
     }
 
     let selected = tab.selected_row;
-    let headers = make_headers(&["Time", "Action", "Target Filename", "Hashes"], &tab.sort);
+    let headers = make_headers(
+        &["Time", "Type", "Image Loaded", "Signature", "Status"],
+        &tab.sort,
+    );
 
     let mut next_sort: Option<usize> = None;
     let mut next_selected = selected;
@@ -123,9 +109,10 @@ pub fn render_file_activity(
         .resizable(true)
         .sense(egui::Sense::click())
         .column(Column::initial(90.0).clip(true))
-        .column(Column::initial(105.0).clip(true))
+        .column(Column::initial(60.0).clip(true))
+        .column(Column::initial(300.0).clip(true))
+        .column(Column::initial(160.0).clip(true))
         .column(Column::remainder().clip(true))
-        .column(Column::initial(180.0).clip(true))
         .header(20.0, |mut header| {
             for (i, h) in headers.iter().enumerate() {
                 header.col(|ui| {
@@ -141,9 +128,10 @@ pub fn render_file_activity(
                 let r = &rows_ref[i];
                 row.set_selected(selected == Some(i));
                 row.col(|ui| { ui.label(fmt_time(r.time)); });
-                row.col(|ui| { ui.label(r.action); });
-                row.col(|ui| { ui.label(&r.filename); });
-                row.col(|ui| { ui.label(&r.hashes); });
+                row.col(|ui| { ui.label(r.kind); });
+                row.col(|ui| { ui.label(&r.image_loaded); });
+                row.col(|ui| { ui.label(&r.signature); });
+                row.col(|ui| { ui.label(&r.signature_status); });
                 let resp = row.response();
                 if resp.clicked() {
                     next_selected = Some(i);

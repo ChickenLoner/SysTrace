@@ -59,3 +59,5 @@ cargo test -p systrace-core          # test core library only
 
 - If you have to make plan, Make the plan extremely concise. Sacrifice grammar for the sake of concision.
 - At the end of each plan, give me a list of unresolved questions to answer, if any.
+- Write what need to be done in `tasks.md` in root directory of this project
+- Always mark what done in `tasks.md` in real time and suggest change to user if needs

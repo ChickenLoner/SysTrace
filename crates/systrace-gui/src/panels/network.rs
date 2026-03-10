@@ -42,6 +42,7 @@ pub fn render_network(
     event_store: &EventStore,
     guid: ProcessGuid,
     tab: &mut TabState,
+    filter: &str,
 ) {
     let indices = event_store.events_for_process_and_types(&guid, &[3, 22]);
     if indices.is_empty() {
@@ -106,6 +107,15 @@ pub fn render_network(
         })
         .collect();
 
+    if !filter.is_empty() {
+        let f = filter.to_lowercase();
+        rows.retain(|r| r.copy_text().to_lowercase().contains(&f));
+    }
+    if rows.is_empty() {
+        render_empty(ui, "No matching events.");
+        return;
+    }
+
     // Sort rows according to current sort state
     let sort_col = tab.sort.column;
     let sort_asc = tab.sort.ascending;
@@ -167,7 +177,7 @@ pub fn render_network(
                 let copy = r.copy_text();
                 resp.context_menu(|ui| {
                     if ui.button("Copy row").clicked() {
-                        ui.output_mut(|o| o.copied_text = copy.clone());
+                        ui.ctx().copy_text(copy.clone());
                         ui.close_menu();
                     }
                 });

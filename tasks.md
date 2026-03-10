@@ -122,7 +122,7 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 ## Phase 3: Full Telemetry Panels
 
 **Goal:** All telemetry tabs with virtual-scrolled tables.
-**Status: IN PROGRESS** — panels/mod.rs, network.rs, file_activity.rs, registry.rs written; pipes/injection/drivers + wiring remain.
+**Status: ✅ COMPLETE**
 
 ### 3.1 Table Infrastructure ✅
 - [x] Shared table rendering helper using `egui_extras::TableBuilder` with virtual scrolling
@@ -146,59 +146,76 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 - [x] Data from EventId 12, 13, 14
 - File: `crates/systrace-gui/src/panels/registry.rs`
 
-### 3.5 Smoke Test — Wire Network Panel First
-- [ ] `state.rs`: add all 6 `TabState` fields (`tab_network`, `tab_files`, `tab_registry`, `tab_pipes`, `tab_injection`, `tab_drivers`) + Default entries
-- [ ] `main.rs`: add `mod panels;`
-- [ ] `app.rs`: wire Network tab only — extract `guid` (Copy) first, then borrow `&self.state.event_store` + `&mut self.state.tab_network` separately (borrow-split pattern)
-- [ ] `cargo build` — fix any compile errors from existing panels (network, file_activity, registry)
-- [ ] Note: `panels/mod.rs` already declares `pub mod pipes/injection/drivers` — must create stub files before build succeeds
+### 3.5 Smoke Test — Wire Network Panel First ✅
+- [x] `state.rs`: add all 6 `TabState` fields (`tab_network`, `tab_files`, `tab_registry`, `tab_pipes`, `tab_injection`, `tab_drivers`) + Default entries
+- [x] `main.rs`: add `mod panels;`
+- [x] `app.rs`: wire Network tab only — extract `guid` (Copy) first, then borrow `&self.state.event_store` + `&mut self.state.tab_network` separately (borrow-split pattern)
+- [x] `cargo build` — fix any compile errors from existing panels (network, file_activity, registry)
+- [x] Note: `panels/mod.rs` already declares `pub mod pipes/injection/drivers` — must create stub files before build succeeds
 
-### 3.6 Pipes Tab
-- [ ] Columns: Time, Action (Create/Connect), Pipe Name
-- [ ] Data from EventId 17, 18
+### 3.6 Pipes Tab ✅
+- [x] Columns: Time, Action (Create/Connect), Pipe Name
+- [x] Data from EventId 17, 18
 - File: `crates/systrace-gui/src/panels/pipes.rs`
 
-### 3.7 Drivers/Modules Tab
-- [ ] Columns: Time, Image Loaded, Signature, Signature Status
-- [ ] Data from EventId 6, 7
+### 3.7 Drivers/Modules Tab ✅
+- [x] Columns: Time, Type (Driver/Image), Image Loaded, Signature, Signature Status
+- [x] Data from EventId 6, 7
 - File: `crates/systrace-gui/src/panels/drivers.rs`
 
-### 3.8 Injection Tab (most complex — do last)
-- [ ] Columns: Time, Type, Role (Source/Target), Source Process, Target Process, Details
-- [ ] Data from EventId 8, 10, 25
-- [ ] Merge logic: combine `events_for_process_and_types(&[8,10,25])` (Vec<usize>) + `events_targeting_process()` (&[usize]) into single Vec, sort, dedup
-- [ ] EventId 25 (ProcessTampering) has no source/target — render as simple row with empty Source/Target columns
+### 3.8 Injection Tab ✅
+- [x] Columns: Time, Type, Role (Source/Target), Source Process, Target Process, Details
+- [x] Data from EventId 8, 10, 25
+- [x] Merge logic: combine `events_for_process_and_types(&[8,10,25])` (Vec<usize>) + `events_targeting_process()` (&[usize]) into single Vec, sort, dedup
+- [x] EventId 25 (ProcessTampering) has no source/target — render as simple row with empty Source/Target columns
 - File: `crates/systrace-gui/src/panels/injection.rs`
 
-### 3.9 Final Wiring
-- [ ] `app.rs`: wire remaining tabs (FileActivity, Registry, Pipes, Injection, DriversModules) using same borrow-split pattern
-- [ ] Reset `TabState.selected_row` to `None` on all tabs when `selected_process` changes (keep sort preferences)
-- [ ] Build + smoke test with sample data: `cargo run -p systrace-gui -- .claude/sysmon.json`
+### 3.9 Final Wiring ✅
+- [x] `app.rs`: wire remaining tabs (FileActivity, Registry, Pipes, Injection, DriversModules) using same borrow-split pattern
+- [x] Reset `TabState.selected_row` to `None` on all tabs when `selected_process` changes (keep sort preferences)
+- [x] Build + smoke test with sample data: `cargo run -p systrace-gui -- .claude/sysmon.json`
 
 ---
 
 ## Phase 4A: UX Polish
 
 **Goal:** Search refinements, tree polish, keyboard navigation.
+**Status: 🔄 IN PROGRESS**
 
-### 4A.1 Search & Filter
+### 4A.0 State scaffolding ✅ DONE
+- [x] `state.rs`: added `TreeEventFilter` struct (network/files/registry/pipes/injection/drivers bool fields + `any_active()`)
+- [x] `state.rs`: added `AppState` fields: `telemetry_filter: String`, `tree_event_filter: TreeEventFilter`, `flat_visible: Vec<ProcessGuid>`, `scroll_to_selected: bool` — all initialised in `Default`
+
+### 4A.1 Search & Filter ⬜ NEXT
 - [x] Process tree text filter (search by image name, PID, command line, user)
-- [ ] Matching nodes highlighted, non-matching branches collapsed
-- [ ] Global text search across all visible telemetry fields
-- [ ] Per-column filters in telemetry tables
-- [ ] Event type checkboxes to include/exclude
+- [x] **All 6 panel render functions** (`render_network`, `render_file_activity`, `render_registry`, `render_pipes`, `render_injection`, `render_drivers`) now accept `filter: &str` param — `rows.retain(|r| r.copy_text().to_lowercase().contains(&f))` applied after building rows
+- [ ] **`app.rs` – exact-match tree filter**: change `render_tree_node` line 354 from `if !matches_self && node.children.is_empty()` → `if !matches_self { return; }` (no subtree fallback)
+- [ ] **`app.rs` – event type filter checkboxes**: add `CollapsingHeader("Event Type Filter")` in `render_process_tree_panel` with 6 `ui.checkbox` calls bound to `self.state.tree_event_filter.*`; add clear button when any active; call `self.node_passes_event_filter(guid)` in `render_tree_node` (return early if false)
+- [ ] **`app.rs` – global telemetry filter bar**: in `render_telemetry_panel`, show a `TextEdit` bound to `self.state.telemetry_filter` above the tab separator (skip for Overview tab); pass `&self.state.telemetry_filter` to all 6 panel calls (requires clone to avoid borrow conflict)
 
-### 4A.2 Process Tree Polish
+### 4A.2 Process Tree Polish ⬜ NEXT
 - [x] Color coding: yellow (terminated), gray (synthetic)
-- [ ] Color coding: red (injection targets), green (system processes)
-- [ ] Node tooltip: full path, command line, user, start time
-- [ ] Right-click context menu: Copy GUID, Copy command line, Expand all children
-- [ ] Scroll to keep selected node visible (from Phase 2)
+- [ ] **`app.rs` – stable node IDs**: replace `ui.make_persistent_id(guid)` with free function `fn tree_node_id(guid: ProcessGuid) -> egui::Id { egui::Id::new(("systrace_node", guid)) }` — needed for expand_all_children and flat_visible to work with same IDs as render
+- [ ] **`app.rs` – color priority**: add `let is_injection_target = !self.state.event_store.events_targeting_process(&guid).is_empty(); let is_system = user.to_uppercase().contains("SYSTEM");` then: synthetic=DARK_GRAY > injection_target=`Color32::from_rgb(220,60,60)` > system=`Color32::from_rgb(80,180,80)` > terminated=`Color32::from_rgb(180,180,100)` > normal
+- [ ] **`app.rs` – node tooltip**: snapshot `image_full`, `cmd`, `user`, `start_str` from node before closures; inside show_header closure: `resp.on_hover_ui(|ui| { ui.label(…) … })`
+- [ ] **`app.rs` – context menu**: 3 buttons: "Copy GUID" (format guid as `{:02x?}` hex), "Copy Command Line", "Expand All Children" (sets `do_expand = Cell::new(false)`; after closures: `if do_expand.get() { self.expand_all_children(ui.ctx(), guid); }`)
+- [ ] **`app.rs` – scroll to selected**: add `self.state.scroll_to_selected = true;` to `select_process()`; in `render_tree_node` snapshot `let should_scroll = self.state.scroll_to_selected && is_selected;`; call `resp.scroll_to_me(Some(egui::Align::Center))` when true; set `self.state.scroll_to_selected = false` after
 
-### 4A.3 Keyboard Navigation
-- [ ] Up/down arrow keys in process tree
-- [ ] Tab switching via keyboard
-- [ ] Ctrl+F for search focus
+### 4A.3 Keyboard Navigation ⬜ NEXT
+- [ ] **`app.rs` – flat_visible rebuild**: at end of `render_process_tree_panel` after scroll area: `let ctx = ui.ctx().clone(); self.state.flat_visible = self.compute_flat_visible(&ctx);`
+- [ ] **`app.rs` – helper `collect_visible_preorder`**: traverses ProcessTree in pre-order DFS; applies same search filter + `node_passes_event_filter`; for nodes with children, recurses only if `CollapsingState::load_with_default_open(ctx, tree_node_id(guid), false).is_open()`
+- [ ] **`app.rs` – helper `compute_flat_visible`**: calls `collect_visible_preorder` for each root; returns `Vec<ProcessGuid>`
+- [ ] **`app.rs` – arrow key nav**: in `render_process_tree_panel`, check `ui.ctx().input(|i| …)` for `ArrowDown`/`ArrowUp`; find current index in `self.state.flat_visible`; clamp next index; call `self.select_process(next_guid)` — only when search TextEdit is NOT focused (`ui.ctx().memory(|m| m.has_focus(search_id))`)
+- [ ] **`app.rs` – Ctrl+Tab tab switching**: in `render_telemetry_panel`, check `i.modifiers.ctrl && i.key_pressed(Key::Tab)` for next tab, add `&& i.modifiers.shift` for prev; cycle through 7-element tab array with `rem_euclid`
+- [ ] **`app.rs` – Ctrl+F search focus**: after rendering the search TextEdit, check `ctrl && Key::F`; call `ui.ctx().memory_mut(|m| m.request_focus(search_id))`
+
+### 4A.4 New helper methods to add to `SysTraceApp` in `app.rs`
+```rust
+fn node_passes_event_filter(&self, guid: ProcessGuid) -> bool { … } // check tree_event_filter
+fn expand_all_children(&self, ctx: &egui::Context, guid: ProcessGuid) { … } // recursive CollapsingState force-open
+fn collect_visible_preorder(&self, ctx: &egui::Context, guid: ProcessGuid, out: &mut Vec<ProcessGuid>) { … }
+fn compute_flat_visible(&self, ctx: &egui::Context) -> Vec<ProcessGuid> { … }
+```
 
 ---
 
@@ -272,7 +289,7 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 |-------|-------|-------------|--------|
 | 1 | Core Engine | `systrace-core` lib: parse → ProcessTree + EventStore | ✅ Done |
 | 2 | Basic GUI | Working app: load file, tree, overview panel | ✅ Done |
-| 3 | Full Telemetry | All 7 telemetry tabs with virtual-scrolled tables | ⬜ Next |
+| 3 | Full Telemetry | All 7 telemetry tabs with virtual-scrolled tables | ✅ Done |
 | 4A | UX Polish | Search/filter, tree polish, keyboard nav | ⬜ |
 | 4B | Timeline | Interactive timeline visualization | ⬜ |
 | 4C | Performance | Benchmarks, string interning, virtual scroll opt | ⬜ |

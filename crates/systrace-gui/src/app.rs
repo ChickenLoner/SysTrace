@@ -6,6 +6,7 @@ use crossbeam_channel::{Receiver, TryRecvError};
 use eframe::egui::{self, Ui};
 use systrace_core::SysmonEvent;
 
+use crate::panels;
 use crate::state::{AppState, FileMetadata, TelemetryTab};
 
 /// Maximum event batches processed per UI frame to keep the frame time bounded.
@@ -53,6 +54,17 @@ impl SysTraceApp {
     /// Called from `main` before the event loop starts to pre-load a file.
     pub fn open_file_on_start(&mut self, path: PathBuf) {
         self.open_file(path);
+    }
+
+    /// Select a process and reset per-tab row selection (keep sort preferences).
+    fn select_process(&mut self, guid: systrace_core::ProcessGuid) {
+        self.state.selected_process = Some(guid);
+        self.state.tab_network.selected_row = None;
+        self.state.tab_files.selected_row = None;
+        self.state.tab_registry.selected_row = None;
+        self.state.tab_pipes.selected_row = None;
+        self.state.tab_injection.selected_row = None;
+        self.state.tab_drivers.selected_row = None;
     }
 
     // -----------------------------------------------------------------------
@@ -364,7 +376,7 @@ impl SysTraceApp {
         if children.is_empty() {
             let rich = egui::RichText::new(&label).color(text_color);
             if ui.selectable_label(is_selected, rich).clicked() {
-                self.state.selected_process = Some(guid);
+                self.select_process(guid);
             }
         } else {
             let id = ui.make_persistent_id(guid);
@@ -379,7 +391,7 @@ impl SysTraceApp {
                 .show_header(ui, |ui| {
                     let rich = egui::RichText::new(&label).color(text_color);
                     if ui.selectable_label(is_selected, rich).clicked() {
-                        self.state.selected_process = Some(guid);
+                        self.select_process(guid);
                     }
                 })
                 .body(|ui| {
@@ -434,11 +446,47 @@ impl SysTraceApp {
 
         match self.state.active_tab {
             TelemetryTab::Overview => self.render_overview(ui),
-            _ => {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.label("(telemetry tab — coming in Phase 3)");
-                });
+            TelemetryTab::Network => {
+                if let Some(guid) = self.state.selected_process {
+                    panels::network::render_network(ui, &self.state.event_store, guid, &mut self.state.tab_network);
+                } else {
+                    panels::render_no_selection(ui);
+                }
+            }
+            TelemetryTab::FileActivity => {
+                if let Some(guid) = self.state.selected_process {
+                    panels::file_activity::render_file_activity(ui, &self.state.event_store, guid, &mut self.state.tab_files);
+                } else {
+                    panels::render_no_selection(ui);
+                }
+            }
+            TelemetryTab::Registry => {
+                if let Some(guid) = self.state.selected_process {
+                    panels::registry::render_registry(ui, &self.state.event_store, guid, &mut self.state.tab_registry);
+                } else {
+                    panels::render_no_selection(ui);
+                }
+            }
+            TelemetryTab::Pipes => {
+                if let Some(guid) = self.state.selected_process {
+                    panels::pipes::render_pipes(ui, &self.state.event_store, guid, &mut self.state.tab_pipes);
+                } else {
+                    panels::render_no_selection(ui);
+                }
+            }
+            TelemetryTab::Injection => {
+                if let Some(guid) = self.state.selected_process {
+                    panels::injection::render_injection(ui, &self.state.event_store, guid, &mut self.state.tab_injection);
+                } else {
+                    panels::render_no_selection(ui);
+                }
+            }
+            TelemetryTab::DriversModules => {
+                if let Some(guid) = self.state.selected_process {
+                    panels::drivers::render_drivers(ui, &self.state.event_store, guid, &mut self.state.tab_drivers);
+                } else {
+                    panels::render_no_selection(ui);
+                }
             }
         }
     }
@@ -455,7 +503,7 @@ impl SysTraceApp {
             return;
         };
 
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 ui.heading("Process Details");
@@ -512,7 +560,7 @@ impl SysTraceApp {
                             &node
                                 .end_time
                                 .map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string())
-                                .unwrap_or_else(|| "(still running)".to_owned())
+                                .unwrap_or_else(|| "Not Detected".to_owned())
                         );
                         row!("Hashes", node.hashes.as_deref().unwrap_or("-"));
                         row!(

@@ -85,17 +85,80 @@ struct DataField {
 // ---------------------------------------------------------------------------
 
 /// Parse the inner Payload JSON string into a flat `HashMap<field_name, value>`.
+///
+/// Falls back to a lenient pass that double-escapes stray backslashes if the
+/// strict parse fails.  Some EVTXECmd versions emit Windows paths with single
+/// backslashes inside JSON strings (e.g. `C:\Windows`) which are invalid JSON.
 pub fn parse_payload(payload: &str) -> Result<HashMap<String, String>, serde_json::Error> {
-    let wrapper: PayloadWrapper = serde_json::from_str(payload)?;
-    let mut map = HashMap::new();
-    if let Some(ed) = wrapper.event_data {
-        for field in ed.data {
-            if let Some(text) = field.text {
-                map.insert(field.name, text);
+    fn extract(wrapper: PayloadWrapper) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if let Some(ed) = wrapper.event_data {
+            for field in ed.data {
+                if let Some(text) = field.text {
+                    map.insert(field.name, text);
+                }
+            }
+        }
+        map
+    }
+
+    // Fast path — standard strict parse.
+    match serde_json::from_str::<PayloadWrapper>(payload) {
+        Ok(w) => return Ok(extract(w)),
+        Err(first_err) => {
+            // Lenient fallback: double any backslash not part of a valid JSON
+            // escape sequence so that Windows paths survive.
+            let fixed = fix_unescaped_backslashes(payload);
+            match serde_json::from_str::<PayloadWrapper>(&fixed) {
+                Ok(w) => Ok(extract(w)),
+                Err(_) => Err(first_err), // report the original error
             }
         }
     }
-    Ok(map)
+}
+
+/// Double any backslash that is NOT already part of a recognised JSON escape
+/// sequence (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`).
+fn fix_unescaped_backslashes(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() + 32);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        // We have a backslash — check what follows.
+        match bytes.get(i + 1).copied() {
+            Some(b'"') | Some(b'\\') | Some(b'/') | Some(b'b')
+            | Some(b'f') | Some(b'n') | Some(b'r') | Some(b't') => {
+                out.push(b'\\');
+                out.push(bytes[i + 1]);
+                i += 2;
+            }
+            Some(b'u') => {
+                // \uXXXX — copy the whole 6-byte sequence verbatim.
+                out.push(b'\\');
+                out.push(b'u');
+                i += 2;
+                for _ in 0..4 {
+                    if i < bytes.len() {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            _ => {
+                // Stray backslash — escape it so JSON stays valid.
+                out.push(b'\\');
+                out.push(b'\\');
+                i += 1;
+            }
+        }
+    }
+    // SAFETY: input was valid UTF-8; we only inserted ASCII bytes.
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,27 @@ use std::collections::{HashMap, HashSet};
 
 use systrace_core::{EventStore, ProcessGuid, ProcessTree, Timestamp};
 
+use crate::panels::TabState;
+
+/// Event category filter for the process tree.
+/// When any field is true, only processes with matching events are shown.
+#[derive(Debug, Clone, Default)]
+pub struct TreeEventFilter {
+    pub network: bool,
+    pub files: bool,
+    pub registry: bool,
+    pub pipes: bool,
+    pub injection: bool,
+    pub drivers: bool,
+}
+
+impl TreeEventFilter {
+    pub fn any_active(&self) -> bool {
+        self.network || self.files || self.registry
+            || self.pipes || self.injection || self.drivers
+    }
+}
+
 /// Which telemetry tab is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TelemetryTab {
@@ -40,6 +61,21 @@ pub struct AppState {
     pub file_metadata: Option<FileMetadata>,
     /// File size in bytes (for progress computation).
     pub file_size: u64,
+    // Per-tab sort/selection state
+    pub tab_network: TabState,
+    pub tab_files: TabState,
+    pub tab_registry: TabState,
+    pub tab_pipes: TabState,
+    pub tab_injection: TabState,
+    pub tab_drivers: TabState,
+    /// Global text filter applied to all telemetry table panels simultaneously.
+    pub telemetry_filter: String,
+    /// Event category checkboxes for narrowing the process tree.
+    pub tree_event_filter: TreeEventFilter,
+    /// Pre-order visible node list for keyboard navigation (rebuilt each frame).
+    pub flat_visible: Vec<ProcessGuid>,
+    /// When true, the next render of the selected node calls scroll_to_me().
+    pub scroll_to_selected: bool,
 }
 
 impl Default for AppState {
@@ -54,6 +90,16 @@ impl Default for AppState {
             parse_error_count: 0,
             file_metadata: None,
             file_size: 0,
+            tab_network: TabState::default(),
+            tab_files: TabState::default(),
+            tab_registry: TabState::default(),
+            tab_pipes: TabState::default(),
+            tab_injection: TabState::default(),
+            tab_drivers: TabState::default(),
+            telemetry_filter: String::new(),
+            tree_event_filter: TreeEventFilter::default(),
+            flat_visible: Vec::new(),
+            scroll_to_selected: false,
         }
     }
 }
