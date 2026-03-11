@@ -327,3 +327,4 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 | 4B | Timeline | Interactive timeline visualization | ✅ Done |
 | 4C | Performance | Benchmarks, string interning, time range filter, app icon | ✅ Done |
 | 5 | Advanced | Query DSL, multi-host, export, UX extras | ✅ Done |
+| 6 | Bugfixes | Horizontal scroll, per-column copy, full timestamp, Modules tab | ✅ Done |
