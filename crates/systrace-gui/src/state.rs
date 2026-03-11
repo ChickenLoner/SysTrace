@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use systrace_core::{EventStore, ProcessGuid, ProcessTree, Timestamp};
 
@@ -36,6 +37,7 @@ pub enum TelemetryTab {
     Pipes,
     Injection,
     DriversModules,
+    Detection,
 }
 
 /// Metadata computed once file loading is complete.
@@ -96,6 +98,7 @@ pub struct AppState {
     pub tab_pipes: TabState,
     pub tab_injection: TabState,
     pub tab_drivers: TabState,
+    pub tab_findings: TabState,
     /// Global text filter applied to all telemetry table panels simultaneously.
     pub telemetry_filter: String,
     /// Event category checkboxes for narrowing the process tree.
@@ -110,6 +113,19 @@ pub struct AppState {
     pub rodeo: SharedRodeo,
     /// Active time range filter for telemetry tables (None = no filter).
     pub time_range_filter: Option<(Timestamp, Timestamp)>,
+    // ── Phase 5 additions ────────────────────────────────────────────────────
+    /// Currently selected host filter (None = show all hosts).
+    pub selected_host: Option<String>,
+    /// Dark mode toggle (true = dark, false = light).
+    pub dark_mode: bool,
+    /// Per-process notes/bookmarks.  Key = ProcessGuid.
+    pub bookmarks: HashMap<ProcessGuid, String>,
+    /// Recently opened file paths (most recent first, max 10).
+    pub recent_files: Vec<PathBuf>,
+    /// Current query DSL text in the Detection tab.
+    pub query_text: String,
+    /// Event indices that matched the last query run.
+    pub query_results: Vec<usize>,
 }
 
 impl Default for AppState {
@@ -130,6 +146,7 @@ impl Default for AppState {
             tab_pipes: TabState::default(),
             tab_injection: TabState::default(),
             tab_drivers: TabState::default(),
+            tab_findings: TabState::default(),
             telemetry_filter: String::new(),
             tree_event_filter: TreeEventFilter::default(),
             flat_visible: Vec::new(),
@@ -137,6 +154,12 @@ impl Default for AppState {
             timeline: TimelineState::default(),
             rodeo: systrace_core::new_rodeo(),
             time_range_filter: None,
+            selected_host: None,
+            dark_mode: true,
+            bookmarks: HashMap::new(),
+            recent_files: Vec::new(),
+            query_text: String::new(),
+            query_results: Vec::new(),
         }
     }
 }

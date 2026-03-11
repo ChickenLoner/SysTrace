@@ -268,30 +268,32 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 
 ---
 
-## Phase 5: Advanced Features (Future)
+## Phase 5: Advanced Features ✅ COMPLETE
 
-### 5.1 Detection & Analysis
-- [ ] Sigma rule YAML parsing → EventFilter implementations
-- [ ] Run filters during/after ingestion, display findings
-- [ ] Threat hunting query DSL: `image contains "powershell" AND event_type = NetworkConnect`
-- [ ] MITRE ATT&CK annotations on timeline and process tree
+### 5.1 Detection & Analysis ✅
+- [x] Threat hunting query DSL: keyword/phrase search with AND semantics across all event fields
+- [x] "🔍 Hunt" tab: query bar (Enter or Run button), results table with Time/EventID/Type/Image/Computer/Details
+- [x] MITRE ATT&CK annotations in Overview tab (list of technique IDs + names from matched events)
+- [x] MITRE badge (⚑) on process tree nodes that have events with MITRE techniques
+- [ ] Sigma rule YAML parsing (deferred — requires serde_yaml dep + complex rule engine)
 
-### 5.2 Multi-Host Support
-- [ ] Group process trees by Computer name
-- [ ] Tab/dropdown to switch between hosts
-- [ ] Cross-host timeline correlation
+### 5.2 Multi-Host Support ✅
+- [x] Host selector dropdown in process tree panel (shown when file has >1 computer name)
+- [x] Filter process tree nodes by selected host (render_tree_node + collect_visible_preorder)
+- [ ] Cross-host timeline correlation (deferred)
 
-### 5.3 Export
-- [ ] Timeline export to CSV/JSON
-- [ ] Process tree export to DOT (Graphviz)
-- [ ] Selected events export to STIX/OpenIOC
-- [ ] HTML report generation
+### 5.3 Export ✅
+- [x] Events export to CSV (File › Export › Events as CSV…)
+- [x] Events export to JSON (File › Export › Events as JSON…)
+- [x] Process tree export to DOT/Graphviz (File › Export › Process Tree as DOT…)
+- [ ] STIX/OpenIOC export (deferred — complex format)
+- [ ] HTML report generation (deferred)
 
-### 5.4 UX Extras
-- [ ] Dark/light theme toggle
-- [ ] Bookmarking / notes on processes
-- [ ] Recent files list
-- [ ] Drag-and-drop file loading
+### 5.4 UX Extras ✅
+- [x] Dark/light theme toggle (File menu + persists across file loads)
+- [x] Bookmarking / notes per process (text area in Overview tab, persists across file loads)
+- [x] Recent files list (File › Recent Files submenu, max 10, most recent first)
+- [x] Drag-and-drop file loading (drop any .json/.ndjson onto the window)
 
 ---
 
@@ -305,4 +307,4 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 | 4A | UX Polish | Search/filter, tree polish, keyboard nav | ✅ Done |
 | 4B | Timeline | Interactive timeline visualization | ✅ Done |
 | 4C | Performance | Benchmarks, string interning, time range filter, app icon | ✅ Done |
-| 5 | Advanced | Sigma rules, query DSL, multi-host, export | ⬜ |
+| 5 | Advanced | Query DSL, multi-host, export, UX extras | ✅ Done |

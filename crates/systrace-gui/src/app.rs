@@ -86,6 +86,14 @@ impl SysTraceApp {
     fn open_file(&mut self, path: PathBuf) {
         let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(1);
 
+        // Preserve cross-file state
+        let dark_mode = self.state.dark_mode;
+        let bookmarks = std::mem::take(&mut self.state.bookmarks);
+        let mut recent_files = std::mem::take(&mut self.state.recent_files);
+        recent_files.retain(|p| p != &path);
+        recent_files.insert(0, path.clone());
+        recent_files.truncate(10);
+
         // Create a fresh rodeo that will be shared with the parser thread.
         let rodeo = systrace_core::new_rodeo();
 
@@ -96,6 +104,11 @@ impl SysTraceApp {
         self.state.loading_progress = Some(0.0);
         self.bytes_read = Arc::new(AtomicU64::new(0));
         self.file_path = Some(path.clone());
+
+        // Restore preserved state
+        self.state.dark_mode = dark_mode;
+        self.state.bookmarks = bookmarks;
+        self.state.recent_files = recent_files;
 
         let (tx, rx) = crossbeam_channel::bounded::<LoadMsg>(64);
         self.rx = Some(rx);
@@ -232,6 +245,229 @@ impl SysTraceApp {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 5: Query DSL
+    // -----------------------------------------------------------------------
+
+    /// Build a flat searchable string from all resolved event fields.
+    fn event_searchable_text(ev: &systrace_core::SysmonEvent, rodeo: &crate::state::SharedRodeo) -> String {
+        use systrace_core::EventDetail;
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(ev.event_id.to_string());
+        parts.push(ev.event_type.display_name().to_lowercase().to_owned());
+        if let Some(img) = ev.image {
+            parts.push(rodeo.resolve(&img).to_lowercase());
+        }
+        if let Some(user) = ev.user {
+            parts.push(rodeo.resolve(&user).to_lowercase());
+        }
+        parts.push(rodeo.resolve(&ev.computer).to_lowercase());
+        if let Some(mt) = &ev.mitre_technique {
+            parts.push(mt.id.to_lowercase());
+            parts.push(mt.name.to_lowercase());
+        }
+        match &ev.detail {
+            EventDetail::ProcessCreate { command_line, .. } => {
+                if let Some(cmd) = command_line { parts.push(cmd.to_lowercase()); }
+            }
+            EventDetail::NetworkConnect {
+                destination_ip, destination_port, destination_hostname,
+                protocol, source_ip, ..
+            } => {
+                if let Some(v) = destination_ip { parts.push(v.to_lowercase()); }
+                if let Some(v) = destination_port { parts.push(v.to_string()); }
+                if let Some(v) = destination_hostname { parts.push(v.to_lowercase()); }
+                if let Some(v) = protocol { parts.push(v.to_lowercase()); }
+                if let Some(v) = source_ip { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::DnsQuery { query_name, query_results, .. } => {
+                if let Some(v) = query_name { parts.push(v.to_lowercase()); }
+                if let Some(v) = query_results { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::FileCreate { target_filename, .. } => {
+                if let Some(v) = target_filename { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::RegistryEvent { target_object, details, .. } => {
+                if let Some(v) = target_object { parts.push(v.to_lowercase()); }
+                if let Some(v) = details { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::PipeEvent { pipe_name, .. } => {
+                if let Some(v) = pipe_name { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::CreateRemoteThread { target_image, source_image, start_address, .. } => {
+                if let Some(v) = target_image { parts.push(v.to_lowercase()); }
+                if let Some(v) = source_image { parts.push(v.to_lowercase()); }
+                if let Some(v) = start_address { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::ProcessAccess { target_image, granted_access, .. } => {
+                if let Some(v) = target_image { parts.push(v.to_lowercase()); }
+                if let Some(v) = granted_access { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::FileDeleteEvent { target_filename, .. } => {
+                if let Some(v) = target_filename { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::DriverLoad { image_loaded, .. } => {
+                if let Some(v) = image_loaded { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::ImageLoad { image_loaded, .. } => {
+                if let Some(v) = image_loaded { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::FileCreateStreamHash { target_filename, .. } => {
+                if let Some(v) = target_filename { parts.push(v.to_lowercase()); }
+            }
+            EventDetail::WmiActivity { operation, .. } => {
+                if let Some(v) = operation { parts.push(v.to_lowercase()); }
+            }
+            _ => {}
+        }
+        parts.join(" ")
+    }
+
+    /// Run the current query text and store matching event indices.
+    fn run_query(&mut self) {
+        let query = self.state.query_text.to_lowercase();
+        if query.trim().is_empty() {
+            self.state.query_results.clear();
+            return;
+        }
+        // Split on " and " — all terms must match (AND semantics).
+        let terms: Vec<String> = query
+            .split(" and ")
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        let rodeo = self.state.rodeo.clone();
+        self.state.query_results = self
+            .state
+            .event_store
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, ev)| {
+                let text = Self::event_searchable_text(ev, &rodeo);
+                terms.iter().all(|term| text.contains(term.as_str()))
+            })
+            .map(|(i, _)| i)
+            .collect();
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5: Export
+    // -----------------------------------------------------------------------
+
+    fn csv_escape(s: &str) -> String {
+        if s.contains(',') || s.contains('"') || s.contains('\n') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_owned()
+        }
+    }
+
+    fn json_escape(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "")
+    }
+
+    fn export_events_csv(&self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("CSV", &["csv"])
+            .set_file_name("systrace_events.csv")
+            .save_file()
+        else {
+            return;
+        };
+
+        use std::io::Write;
+        let Ok(mut f) = std::fs::File::create(&path) else { return; };
+        let rodeo = &self.state.rodeo;
+        let _ = writeln!(f, "Time,EventID,EventType,Computer,Image,User");
+        for ev in &self.state.event_store.events {
+            let time = ev.time_created.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+            let etype = ev.event_type.display_name();
+            let computer = rodeo.resolve(&ev.computer);
+            let image = ev.image.map(|s| rodeo.resolve(&s).to_owned()).unwrap_or_default();
+            let user = ev.user.map(|s| rodeo.resolve(&s).to_owned()).unwrap_or_default();
+            let _ = writeln!(
+                f,
+                "{},{},{},{},{},{}",
+                Self::csv_escape(&time),
+                ev.event_id,
+                etype,
+                Self::csv_escape(computer),
+                Self::csv_escape(&image),
+                Self::csv_escape(&user),
+            );
+        }
+    }
+
+    fn export_tree_dot(&self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("DOT / Graphviz", &["dot"])
+            .set_file_name("process_tree.dot")
+            .save_file()
+        else {
+            return;
+        };
+
+        use std::io::Write;
+        let Ok(mut f) = std::fs::File::create(&path) else { return; };
+        let _ = writeln!(f, "digraph ProcessTree {{");
+        let _ = writeln!(f, "  rankdir=LR;");
+        let _ = writeln!(f, "  node [shape=box fontname=\"monospace\"];");
+        for (guid, node) in &self.state.process_tree.nodes {
+            let gid: String = guid.iter().map(|b| format!("{b:02x}")).collect();
+            let label = node.image_name.as_deref().unwrap_or("?");
+            let pid = node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_owned());
+            let style = if node.is_synthetic {
+                " style=dashed"
+            } else if node.end_time.is_some() {
+                " color=gray"
+            } else {
+                ""
+            };
+            let label_esc = label.replace('"', "\\\"");
+            let _ = writeln!(f, "  n{gid} [label=\"{label_esc}\\n({pid})\"{style}];");
+            if let Some(parent_guid) = &node.parent_guid {
+                let pgid: String = parent_guid.iter().map(|b| format!("{b:02x}")).collect();
+                let _ = writeln!(f, "  n{pgid} -> n{gid};");
+            }
+        }
+        let _ = writeln!(f, "}}");
+    }
+
+    fn export_events_json(&self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .set_file_name("systrace_events.json")
+            .save_file()
+        else {
+            return;
+        };
+
+        use std::io::Write;
+        let Ok(mut f) = std::fs::File::create(&path) else { return; };
+        let rodeo = &self.state.rodeo;
+        let total = self.state.event_store.events.len();
+        let _ = writeln!(f, "[");
+        for (i, ev) in self.state.event_store.events.iter().enumerate() {
+            let time = ev.time_created.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+            let etype = ev.event_type.display_name();
+            let computer = Self::json_escape(rodeo.resolve(&ev.computer));
+            let image = ev.image.map(|s| Self::json_escape(rodeo.resolve(&s))).unwrap_or_default();
+            let user = ev.user.map(|s| Self::json_escape(rodeo.resolve(&s))).unwrap_or_default();
+            let comma = if i < total - 1 { "," } else { "" };
+            let _ = writeln!(
+                f,
+                "  {{\"time\":\"{time}\",\"event_id\":{},\"event_type\":\"{etype}\",\"computer\":\"{computer}\",\"image\":\"{image}\",\"user\":\"{user}\"}}{comma}",
+                ev.event_id,
+            );
+        }
+        let _ = writeln!(f, "]");
+    }
+
+    // -----------------------------------------------------------------------
     // Helper: event filter predicate for tree nodes
     // -----------------------------------------------------------------------
 
@@ -335,6 +571,13 @@ impl SysTraceApp {
         let Some(node) = self.state.process_tree.get(&guid) else {
             return;
         };
+
+        // Host filter
+        if let Some(host) = &self.state.selected_host {
+            if &node.computer != host {
+                return;
+            }
+        }
 
         // Text filter — exact match, no subtree fallback
         if !filter.is_empty() {
@@ -809,6 +1052,51 @@ impl SysTraceApp {
                     }
                     ui.close_menu();
                 }
+
+                // Recent files submenu
+                let recent = self.state.recent_files.clone();
+                if !recent.is_empty() {
+                    ui.menu_button("Recent Files", |ui| {
+                        for path in &recent {
+                            let label = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("(unknown)");
+                            if ui.button(label).clicked() {
+                                self.open_file(path.clone());
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
+
+                ui.separator();
+
+                // Export submenu
+                ui.menu_button("Export", |ui| {
+                    if ui.button("Events as CSV…").clicked() {
+                        self.export_events_csv();
+                        ui.close_menu();
+                    }
+                    if ui.button("Events as JSON…").clicked() {
+                        self.export_events_json();
+                        ui.close_menu();
+                    }
+                    if ui.button("Process Tree as DOT…").clicked() {
+                        self.export_tree_dot();
+                        ui.close_menu();
+                    }
+                });
+
+                ui.separator();
+
+                // Theme toggle
+                let theme_label = if self.state.dark_mode { "☀ Light Mode" } else { "🌙 Dark Mode" };
+                if ui.button(theme_label).clicked() {
+                    self.state.dark_mode = !self.state.dark_mode;
+                    ui.close_menu();
+                }
+
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -855,6 +1143,35 @@ impl SysTraceApp {
 
     fn render_process_tree_panel(&mut self, ui: &mut Ui) {
         ui.heading("Processes");
+
+        // Host selector (only shown when multiple hosts are present)
+        if let Some(meta) = &self.state.file_metadata {
+            if meta.computer_names.len() > 1 {
+                let names: Vec<String> = {
+                    let mut v: Vec<String> = meta.computer_names.iter().cloned().collect();
+                    v.sort();
+                    v
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Host:");
+                    let current = self.state.selected_host.clone().unwrap_or_else(|| "All".to_owned());
+                    egui::ComboBox::from_id_salt("host_selector")
+                        .selected_text(&current)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(self.state.selected_host.is_none(), "All").clicked() {
+                                self.state.selected_host = None;
+                            }
+                            for name in &names {
+                                let sel = self.state.selected_host.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(sel, name).clicked() {
+                                    self.state.selected_host = Some(name.clone());
+                                }
+                            }
+                        });
+                });
+            }
+        }
+
         ui.separator();
 
         // Stable ID for the search TextEdit (needed for Ctrl+F focus)
@@ -985,7 +1302,15 @@ impl SysTraceApp {
         let user_str = node.user.clone().unwrap_or_else(|| "-".to_owned());
         let start_str = node.start_time.format("%Y-%m-%d %H:%M:%S UTC").to_string();
         let children: Vec<_> = node.children.clone();
+        let computer = node.computer.clone();
         // node borrow on process_tree ends here
+
+        // Host filter (Phase 5: multi-host support)
+        if let Some(host) = &self.state.selected_host {
+            if computer != *host {
+                return;
+            }
+        }
 
         // Text filter — exact match, no subtree fallback
         let filter = self.state.search_filter.to_lowercase();
@@ -1026,10 +1351,26 @@ impl SysTraceApp {
             ui.visuals().text_color()
         };
 
-        let label = if is_synthetic {
-            format!("{image_name} ({pid_str}) [synthetic]")
-        } else {
-            format!("{image_name} ({pid_str})")
+        // MITRE badge: check if any event for this process has a MITRE technique
+        let has_mitre = self
+            .state
+            .event_store
+            .events_for_process(&guid)
+            .iter()
+            .any(|&idx| self.state.event_store.events[idx].mitre_technique.is_some());
+        // Bookmark indicator
+        let is_bookmarked = self.state.bookmarks.contains_key(&guid);
+
+        let label = {
+            let base = if is_synthetic {
+                format!("{image_name} ({pid_str}) [synthetic]")
+            } else {
+                format!("{image_name} ({pid_str})")
+            };
+            let mut l = base;
+            if has_mitre { l = format!("⚑ {l}"); }
+            if is_bookmarked { l = format!("🔖 {l}"); }
+            l
         };
 
         let is_selected = self.state.selected_process == Some(guid);
@@ -1135,6 +1476,7 @@ impl SysTraceApp {
             TelemetryTab::Pipes,
             TelemetryTab::Injection,
             TelemetryTab::DriversModules,
+            TelemetryTab::Detection,
         ];
         let (tab_forward, tab_backward) = ui.ctx().input(|i| {
             (
@@ -1163,6 +1505,7 @@ impl SysTraceApp {
                 (TelemetryTab::Pipes, "Pipes"),
                 (TelemetryTab::Injection, "Injection"),
                 (TelemetryTab::DriversModules, "Drivers"),
+                (TelemetryTab::Detection, "🔍 Hunt"),
             ] {
                 if ui
                     .selectable_label(self.state.active_tab == tab, label)
@@ -1172,6 +1515,29 @@ impl SysTraceApp {
                 }
             }
         });
+
+        // Detection tab: query bar (shown above the separator for easy access)
+        if self.state.active_tab == TelemetryTab::Detection {
+            ui.horizontal(|ui| {
+                ui.label("Query:");
+                let response = egui::TextEdit::singleline(&mut self.state.query_text)
+                    .hint_text("e.g. powershell and networkconnect   (terms joined by AND)")
+                    .desired_width(ui.available_width() - 80.0)
+                    .show(ui)
+                    .response;
+                if (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button("Run").clicked()
+                {
+                    self.run_query();
+                }
+                if !self.state.query_results.is_empty() && ui.small_button("✕").clicked() {
+                    self.state.query_results.clear();
+                }
+            });
+            if !self.state.query_results.is_empty() {
+                ui.label(format!("{} results", self.state.query_results.len()));
+            }
+        }
 
         // Global telemetry filter bar (shown for all non-Overview tabs)
         if self.state.active_tab != TelemetryTab::Overview {
@@ -1298,10 +1664,21 @@ impl SysTraceApp {
                     panels::render_no_selection(ui);
                 }
             }
+            TelemetryTab::Detection => {
+                let rodeo = self.state.rodeo.clone();
+                let query_results = self.state.query_results.clone();
+                panels::detection::render_detection(
+                    ui,
+                    &self.state.event_store,
+                    &query_results,
+                    &rodeo,
+                    &mut self.state.tab_findings,
+                );
+            }
         }
     }
 
-    fn render_overview(&self, ui: &mut Ui) {
+    fn render_overview(&mut self, ui: &mut Ui) {
         let Some(guid) = self.state.selected_process else {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
@@ -1309,9 +1686,37 @@ impl SysTraceApp {
             });
             return;
         };
-        let Some(node) = self.state.process_tree.get(&guid) else {
-            return;
+
+        // Snapshot all node fields as owned values so the borrow on process_tree
+        // is released before we need &mut self inside the closure (for bookmarks).
+        let (
+            ov_image, ov_pid, ov_guid_str, ov_cmdline, ov_user, ov_integrity, ov_logon_id,
+            ov_computer, ov_start, ov_end, ov_hashes, ov_parent_image, ov_parent_pid,
+        ) = match self.state.process_tree.get(&guid) {
+            None => return,
+            Some(node) => (
+                node.image.clone().unwrap_or_else(|| "-".to_owned()),
+                node.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_owned()),
+                {
+                    let s = format!("{:x?}", guid)
+                        .replace(", ", "").replace('[', "").replace(']', "");
+                    s
+                },
+                node.command_line.clone().unwrap_or_else(|| "-".to_owned()),
+                node.user.clone().unwrap_or_else(|| "-".to_owned()),
+                node.integrity_level.clone().unwrap_or_else(|| "-".to_owned()),
+                node.logon_id.clone().unwrap_or_else(|| "-".to_owned()),
+                node.computer.clone(),
+                node.start_time.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string(),
+                node.end_time
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string())
+                    .unwrap_or_else(|| "Not Detected".to_owned()),
+                node.hashes.clone().unwrap_or_else(|| "-".to_owned()),
+                node.parent_image.clone().unwrap_or_else(|| "-".to_owned()),
+                node.parent_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_owned()),
+            ),
         };
+        // process_tree borrow dropped here — can now use &mut self below
 
         egui::ScrollArea::both()
             .auto_shrink([false; 2])
@@ -1332,58 +1737,19 @@ impl SysTraceApp {
                             };
                         }
 
-                        row!("Image", node.image.as_deref().unwrap_or("-"));
-                        row!(
-                            "PID",
-                            node.pid
-                                .map(|p| p.to_string())
-                                .as_deref()
-                                .unwrap_or("-")
-                        );
-                        row!(
-                            "GUID",
-                            &format!("{:x?}", guid)
-                                .replace(", ", "")
-                                .replace('[', "")
-                                .replace(']', "")
-                        );
-                        row!(
-                            "Command Line",
-                            node.command_line.as_deref().unwrap_or("-")
-                        );
-                        row!("User", node.user.as_deref().unwrap_or("-"));
-                        row!(
-                            "Integrity",
-                            node.integrity_level.as_deref().unwrap_or("-")
-                        );
-                        row!(
-                            "Logon ID",
-                            node.logon_id.as_deref().unwrap_or("-")
-                        );
-                        row!("Computer", &node.computer);
-                        row!(
-                            "Start Time",
-                            &node.start_time.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string()
-                        );
-                        row!(
-                            "End Time",
-                            &node
-                                .end_time
-                                .map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string())
-                                .unwrap_or_else(|| "Not Detected".to_owned())
-                        );
-                        row!("Hashes", node.hashes.as_deref().unwrap_or("-"));
-                        row!(
-                            "Parent Image",
-                            node.parent_image.as_deref().unwrap_or("-")
-                        );
-                        row!(
-                            "Parent PID",
-                            &node
-                                .parent_pid
-                                .map(|p| p.to_string())
-                                .unwrap_or_else(|| "-".to_owned())
-                        );
+                        row!("Image", ov_image.as_str());
+                        row!("PID", ov_pid.as_str());
+                        row!("GUID", ov_guid_str.as_str());
+                        row!("Command Line", ov_cmdline.as_str());
+                        row!("User", ov_user.as_str());
+                        row!("Integrity", ov_integrity.as_str());
+                        row!("Logon ID", ov_logon_id.as_str());
+                        row!("Computer", ov_computer.as_str());
+                        row!("Start Time", ov_start.as_str());
+                        row!("End Time", ov_end.as_str());
+                        row!("Hashes", ov_hashes.as_str());
+                        row!("Parent Image", ov_parent_image.as_str());
+                        row!("Parent PID", ov_parent_pid.as_str());
                     });
 
                 ui.add_space(12.0);
@@ -1426,12 +1792,72 @@ impl SysTraceApp {
                             ui.end_row();
                         }
                     });
+
+                // MITRE ATT&CK annotations
+                let mitre_events: Vec<_> = self
+                    .state
+                    .event_store
+                    .events_for_process(&guid)
+                    .iter()
+                    .filter_map(|&idx| {
+                        let ev = &self.state.event_store.events[idx];
+                        ev.mitre_technique.as_ref().map(|mt| (ev.event_id, mt.id.clone(), mt.name.clone()))
+                    })
+                    .collect();
+                if !mitre_events.is_empty() {
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.heading("MITRE ATT&CK");
+                    ui.add_space(4.0);
+                    let mut seen = std::collections::HashSet::new();
+                    for (eid, tid, tname) in &mitre_events {
+                        if seen.insert((eid, tid)) {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(egui::Color32::from_rgb(220, 120, 60), tid);
+                                ui.label(format!("— {tname}  (EventID {eid})"));
+                            });
+                        }
+                    }
+                }
+
+                // Notes / bookmarks
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.heading("Notes");
+                    if self.state.bookmarks.contains_key(&guid) {
+                        ui.label("🔖");
+                    }
+                });
+                ui.add_space(4.0);
+                let note = self.state.bookmarks.entry(guid).or_default();
+                ui.add(
+                    egui::TextEdit::multiline(note)
+                        .hint_text("Add investigation notes here…")
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(4),
+                );
             });
     }
 }
 
 impl eframe::App for SysTraceApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply theme
+        if self.state.dark_mode {
+            ctx.set_visuals(egui::Visuals::dark());
+        } else {
+            ctx.set_visuals(egui::Visuals::light());
+        }
+
+        // Drag-and-drop file loading
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if let Some(file) = dropped.into_iter().find(|f| f.path.is_some()) {
+            if let Some(path) = file.path {
+                self.open_file(path);
+            }
+        }
+
         // Poll background loading channel
         self.poll_loading();
 
