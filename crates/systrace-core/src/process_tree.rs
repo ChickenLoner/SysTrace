@@ -68,21 +68,26 @@ impl ProcessTree {
     }
 
     /// Process an EventId=1 (ProcessCreate) event.
-    pub fn insert_process_create(&mut self, event: &SysmonEvent) {
+    pub fn insert_process_create(&mut self, event: &SysmonEvent, rodeo: &crate::SharedRodeo) {
         let guid = match event.process_guid {
             Some(g) => g,
             None => return,
         };
+
+        // Resolve interned fields to owned Strings for ProcessNode storage.
+        let image: Option<String> = event.image.map(|s| rodeo.resolve(&s).to_owned());
+        let user: Option<String>  = event.user.map(|s| rodeo.resolve(&s).to_owned());
+        let computer: String      = rodeo.resolve(&event.computer).to_owned();
 
         // If a synthetic placeholder already exists for this guid, promote it.
         let node = if let Some(mut existing) = self.nodes.remove(&guid) {
             // Promote synthetic node with real data
             existing.is_synthetic = false;
             existing.pid = event.process_id;
-            existing.image = event.image.clone();
-            existing.image_name = ProcessNode::image_name_from(&event.image);
-            existing.user = event.user.clone();
-            existing.computer = event.computer.clone();
+            existing.image_name = ProcessNode::image_name_from(&image);
+            existing.image = image.clone();
+            existing.user = user.clone();
+            existing.computer = computer.clone();
             existing.start_time = event.time_created;
 
             if let EventDetail::ProcessCreate {
@@ -144,8 +149,8 @@ impl ProcessTree {
             ProcessNode {
                 guid,
                 pid: event.process_id,
-                image: event.image.clone(),
-                image_name: ProcessNode::image_name_from(&event.image),
+                image_name: ProcessNode::image_name_from(&image),
+                image,
                 command_line,
                 parent_guid: parent_process_guid,
                 parent_pid: parent_process_id,
@@ -154,11 +159,11 @@ impl ProcessTree {
                 children: Vec::new(),
                 start_time: event.time_created,
                 end_time: None,
-                user: event.user.clone(),
+                user,
                 hashes,
                 integrity_level,
                 logon_id,
-                computer: event.computer.clone(),
+                computer,
                 is_synthetic: false,
             }
         };

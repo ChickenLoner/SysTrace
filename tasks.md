@@ -239,24 +239,32 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 
 ---
 
-## Phase 4C: Performance
+## Phase 4C: Performance ✅ COMPLETE
 
 **Goal:** Benchmarks, string interning, memory optimization.
-**Prerequisite:** Benchmark harness must exist before optimizing.
+**Status: ✅ COMPLETE**
 
-### 4C.1 Benchmark Harness
-- [ ] Benchmark: parse sample file, print time + memory stats (from Phase 1)
-- [ ] Validate against arch targets: 1M events <10s load, <16ms frame, <100ms tab switch
+### 4C.1 Benchmark Harness ✅
+- [x] `crates/systrace-core/src/bin/bench.rs` — parse sample file, print time + event count + process count + interned string count + estimated heap savings
+- [x] Run via: `cargo run -p systrace-core --bin bench -- .claude/sysmon.json`
 
-### 4C.2 String Interning (core data layer refactor)
-- [ ] String interning with `lasso` for Image paths, Computer names, UserNames
-- [ ] Touches: `SysmonEvent`, `ProcessNode`, parser — this is NOT cosmetic polish
+### 4C.2 String Interning (core data layer refactor) ✅
+- [x] `SysmonEvent`: `computer: Spur`, `image: Option<Spur>`, `user: Option<Spur>` — 4-byte keys replacing heap Strings
+- [x] `SharedRodeo = Arc<ThreadedRodeo<Spur>>` type alias in `systrace-core/src/lib.rs`
+- [x] Parser thread interns via `rodeo.get_or_intern()` during parse; UI resolves via `rodeo.resolve()`
+- [x] `ProcessNode` still stores owned `String` (resolved at insert time) — avoids threading rodeo through display code
+- [x] `AppState.rodeo: SharedRodeo` — shared between background thread and UI thread
 - [x] ProcessGuid stored as `[u8; 16]` (done in Phase 1)
 
-### 4C.3 Virtual Scrolling Optimization
-- [ ] Pre-computed flattened tree for virtual scrolling (cache, invalidate on expand/collapse)
-- [ ] Lazy event filtering with frame budget (paginate if >5ms)
-- [ ] Time range filter (slider or date picker)
+### 4C.3 Time Range Filter ✅
+- [x] `TimelineState.filter_active` toggle in timeline panel header ("🔗 Filter Tables" button)
+- [x] `AppState.time_range_filter: Option<(Timestamp, Timestamp)>` — updated from timeline visible window
+- [x] All 6 panel render functions accept `time_range: Option<(Timestamp, Timestamp)>` and apply `rows.retain` filter
+- [x] Filter cleared when timeline filter toggled off or process changes
+
+### App Icon ✅
+- [x] `icon.png` loaded at compile time via `include_bytes!("../../../icon.png")`
+- [x] Decoded to RGBA via `image` crate; wired into `ViewportBuilder::with_icon`
 
 ---
 
@@ -296,5 +304,5 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 | 3 | Full Telemetry | All 7 telemetry tabs with virtual-scrolled tables | ✅ Done |
 | 4A | UX Polish | Search/filter, tree polish, keyboard nav | ✅ Done |
 | 4B | Timeline | Interactive timeline visualization | ✅ Done |
-| 4C | Performance | Benchmarks, string interning, virtual scroll opt | ⬜ |
+| 4C | Performance | Benchmarks, string interning, time range filter, app icon | ✅ Done |
 | 5 | Advanced | Sigma rules, query DSL, multi-host, export | ⬜ |

@@ -86,8 +86,12 @@ impl SysTraceApp {
     fn open_file(&mut self, path: PathBuf) {
         let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(1);
 
-        // Reset all state for the new file
+        // Create a fresh rodeo that will be shared with the parser thread.
+        let rodeo = systrace_core::new_rodeo();
+
+        // Reset all state for the new file, then install the new rodeo.
         self.state = AppState::default();
+        self.state.rodeo = rodeo.clone();
         self.state.file_size = file_size;
         self.state.loading_progress = Some(0.0);
         self.bytes_read = Arc::new(AtomicU64::new(0));
@@ -106,9 +110,10 @@ impl SysTraceApp {
                 let path2 = path.clone();
                 let br = bytes_read.clone();
                 let etx = event_tx.clone();
+                let r = rodeo.clone();
                 std::thread::spawn(move || {
                     let mut errors = Vec::new();
-                    let _ = systrace_core::parse_file(&path2, &etx, &br, &mut errors);
+                    let _ = systrace_core::parse_file(&path2, &etx, &br, &mut errors, &r);
                     let _ = errors.len();
                 });
             }
@@ -143,9 +148,10 @@ impl SysTraceApp {
             match rx.try_recv() {
                 Ok(LoadMsg::Batch(batch)) => {
                     batches_this_frame += 1;
+                    let rodeo = self.state.rodeo.clone();
                     for event in batch {
                         if event.event_id == 1 {
-                            self.state.process_tree.insert_process_create(&event);
+                            self.state.process_tree.insert_process_create(&event, &rodeo);
                         } else if event.event_id == 5 {
                             if let Some(guid) = event.process_guid {
                                 self.state
@@ -192,8 +198,9 @@ impl SysTraceApp {
         let mut time_range: Option<(systrace_core::Timestamp, systrace_core::Timestamp)> = None;
         let mut computer_names = std::collections::HashSet::new();
 
+        let rodeo = self.state.rodeo.clone();
         for event in &self.state.event_store.events {
-            computer_names.insert(event.computer.clone());
+            computer_names.insert(rodeo.resolve(&event.computer).to_owned());
             match &mut time_range {
                 None => time_range = Some((event.time_created, event.time_created)),
                 Some((min, max)) => {
@@ -457,6 +464,20 @@ impl SysTraceApp {
                             if ui.small_button("Fit").clicked() {
                                 self.state.timeline.reset();
                             }
+                            let filter_label = if self.state.timeline.filter_active {
+                                "🔗 Filtering"
+                            } else {
+                                "🔗 Filter Tables"
+                            };
+                            if ui.selectable_label(self.state.timeline.filter_active, filter_label)
+                                .on_hover_text("Filter telemetry tables to the visible time window")
+                                .clicked()
+                            {
+                                self.state.timeline.filter_active = !self.state.timeline.filter_active;
+                                if !self.state.timeline.filter_active {
+                                    self.state.time_range_filter = None;
+                                }
+                            }
                         });
                     }
                 });
@@ -554,6 +575,20 @@ impl SysTraceApp {
             .timeline
             .pan_offset
             .clamp(-view_secs * 0.1, (total_secs + view_secs * 0.1).max(0.0));
+
+        // Update time range filter for telemetry tables if active
+        if self.state.timeline.filter_active {
+            use chrono::Duration;
+            let vis_start = t_start + Duration::milliseconds(
+                (self.state.timeline.pan_offset * 1000.0) as i64
+            );
+            let vis_end = t_start + Duration::milliseconds(
+                ((self.state.timeline.pan_offset + view_secs) * 1000.0) as i64
+            );
+            self.state.time_range_filter = Some((vis_start, vis_end));
+        } else {
+            self.state.time_range_filter = None;
+        }
 
         // Allocate drawing area
         let (response, painter) =
@@ -737,8 +772,9 @@ impl SysTraceApp {
                             Self::timeline_event_label(event.event_id)
                         ));
                         ui.label(format!("Time: {ts_str} (+{t_offset:.3}s)"));
-                        if let Some(image) = &event.image {
-                            ui.label(format!("Image: {image}"));
+                        if let Some(img_spur) = event.image {
+                            let img = self.state.rodeo.resolve(&img_spur);
+                            ui.label(format!("Image: {img}"));
                         }
                     }
                 },
@@ -1172,8 +1208,9 @@ impl SysTraceApp {
             return;
         }
 
-        // Clone filter to avoid borrow conflict with &mut self in panel calls
+        // Clone filter + time_range to avoid borrow conflict with &mut self in panel calls
         let filter = self.state.telemetry_filter.clone();
+        let time_range = self.state.time_range_filter;
 
         match self.state.active_tab {
             TelemetryTab::Overview => self.render_overview(ui),
@@ -1185,6 +1222,7 @@ impl SysTraceApp {
                         guid,
                         &mut self.state.tab_network,
                         &filter,
+                        time_range,
                     );
                 } else {
                     panels::render_no_selection(ui);
@@ -1198,6 +1236,7 @@ impl SysTraceApp {
                         guid,
                         &mut self.state.tab_files,
                         &filter,
+                        time_range,
                     );
                 } else {
                     panels::render_no_selection(ui);
@@ -1211,6 +1250,7 @@ impl SysTraceApp {
                         guid,
                         &mut self.state.tab_registry,
                         &filter,
+                        time_range,
                     );
                 } else {
                     panels::render_no_selection(ui);
@@ -1224,6 +1264,7 @@ impl SysTraceApp {
                         guid,
                         &mut self.state.tab_pipes,
                         &filter,
+                        time_range,
                     );
                 } else {
                     panels::render_no_selection(ui);
@@ -1237,6 +1278,7 @@ impl SysTraceApp {
                         guid,
                         &mut self.state.tab_injection,
                         &filter,
+                        time_range,
                     );
                 } else {
                     panels::render_no_selection(ui);
@@ -1250,6 +1292,7 @@ impl SysTraceApp {
                         guid,
                         &mut self.state.tab_drivers,
                         &filter,
+                        time_range,
                     );
                 } else {
                     panels::render_no_selection(ui);

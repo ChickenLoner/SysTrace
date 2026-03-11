@@ -37,6 +37,7 @@ pub fn render_registry(
     guid: ProcessGuid,
     tab: &mut TabState,
     filter: &str,
+    time_range: Option<(Timestamp, Timestamp)>,
 ) {
     let indices = event_store.events_for_process_and_types(&guid, &[12, 13, 14]);
     if indices.is_empty() {
@@ -77,6 +78,9 @@ pub fn render_registry(
     if !filter.is_empty() {
         let f = filter.to_lowercase();
         rows.retain(|r| r.copy_text().to_lowercase().contains(&f));
+    }
+    if let Some((t_from, t_to)) = time_range {
+        rows.retain(|r| r.time >= t_from && r.time <= t_to);
     }
     if rows.is_empty() {
         render_empty(ui, "No matching events.");

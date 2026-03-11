@@ -11,15 +11,32 @@ struct Args {
     file: Option<std::path::PathBuf>,
 }
 
+/// Load the bundled application icon from `icon.png` at the project root.
+fn load_icon() -> Option<eframe::egui::viewport::IconData> {
+    let bytes = include_bytes!("../../../icon.png");
+    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(eframe::egui::viewport::IconData {
+        rgba: img.into_raw(),
+        width,
+        height,
+    })
+}
+
 fn main() -> eframe::Result {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
 
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("SysTrace")
+        .with_inner_size([1280.0, 800.0]);
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("SysTrace")
-            .with_inner_size([1280.0, 800.0]),
+        viewport,
         ..Default::default()
     };
 
@@ -29,9 +46,6 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let mut app = app::SysTraceApp::new(cc);
             if let Some(path) = args.file.clone() {
-                // Delay open until after creation — schedule via a channel trick
-                // For simplicity we open directly (the UI loop hasn't started yet,
-                // so the first frame will start the background load).
                 app.open_file_on_start(path);
             }
             Ok(Box::new(app))

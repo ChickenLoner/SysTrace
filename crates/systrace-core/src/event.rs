@@ -279,6 +279,10 @@ pub enum EventDetail {
 }
 
 /// A fully parsed Sysmon event with common fields + type-specific detail.
+///
+/// `computer`, `image`, and `user` are stored as interned `lasso::Spur` keys
+/// to avoid heap-allocating thousands of duplicate strings.
+/// Resolve them through the `SharedRodeo` owned by `AppState`.
 #[derive(Debug, Clone)]
 pub struct SysmonEvent {
     // --- Common fields ---
@@ -286,11 +290,14 @@ pub struct SysmonEvent {
     pub event_type: SysmonEventType,
     pub time_created: Timestamp,
     pub record_number: u64,
-    pub computer: String,
+    /// Interned hostname. Resolve via `SharedRodeo::resolve`.
+    pub computer: lasso::Spur,
     pub process_guid: Option<ProcessGuid>,
     pub process_id: Option<u32>,
-    pub image: Option<String>,
-    pub user: Option<String>,
+    /// Interned image path (e.g. `C:\Windows\System32\svchost.exe`).
+    pub image: Option<lasso::Spur>,
+    /// Interned user name.
+    pub user: Option<lasso::Spur>,
     pub rule_name: Option<String>,
     pub mitre_technique: Option<MitreTechnique>,
 

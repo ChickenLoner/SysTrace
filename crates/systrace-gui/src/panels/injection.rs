@@ -41,6 +41,7 @@ pub fn render_injection(
     guid: ProcessGuid,
     tab: &mut TabState,
     filter: &str,
+    time_range: Option<(Timestamp, Timestamp)>,
 ) {
     // Merge: events where this process is source (8, 10, 25 in its own index)
     // + events where this process is the target (8, 10 only, from target index).
@@ -134,6 +135,9 @@ pub fn render_injection(
     if !filter.is_empty() {
         let f = filter.to_lowercase();
         rows.retain(|r| r.copy_text().to_lowercase().contains(&f));
+    }
+    if let Some((t_from, t_to)) = time_range {
+        rows.retain(|r| r.time >= t_from && r.time <= t_to);
     }
     if rows.is_empty() {
         render_empty(ui, "No matching events.");

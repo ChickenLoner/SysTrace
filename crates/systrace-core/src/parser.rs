@@ -224,11 +224,15 @@ fn parse_timestamp(s: &str, line: u64, errors: &mut Vec<ParseError>) -> Option<T
 // ---------------------------------------------------------------------------
 
 /// Build a `SysmonEvent` from the raw record + parsed field map.
+///
+/// `computer`, `image`, and `user` are interned into `rodeo` to deduplicate
+/// the thousands of repeated strings across a large log file.
 pub fn extract_event(
     raw: RawEvtxRecord,
     fields: &HashMap<String, String>,
     line: u64,
     errors: &mut Vec<ParseError>,
+    rodeo: &crate::SharedRodeo,
 ) -> Option<SysmonEvent> {
     let event_type = SysmonEventType::from_event_id(raw.event_id);
 
@@ -237,10 +241,12 @@ pub fn extract_event(
     // Common per-process fields (present on most events but not all)
     let process_guid = get_guid(fields, "ProcessGuid", line, errors);
     let process_id = get_u32(fields, "ProcessId");
-    let image = get_owned(fields, "Image");
-    // UserName from top-level, or from payload field "User"
+    // Intern highly-duplicated string fields for memory efficiency.
+    let image = get_owned(fields, "Image").map(|s| rodeo.get_or_intern(s.as_str()));
     let user = raw.user_name.clone()
-        .or_else(|| get_owned(fields, "User"));
+        .or_else(|| get_owned(fields, "User"))
+        .map(|s| rodeo.get_or_intern(s.as_str()));
+    let computer = rodeo.get_or_intern(raw.computer.as_str());
     let rule_name = get_owned(fields, "RuleName");
     let mitre_technique = rule_name.as_deref().and_then(parse_mitre_rule_name);
 
@@ -251,7 +257,7 @@ pub fn extract_event(
         event_type,
         time_created,
         record_number: raw.record_number,
-        computer: raw.computer,
+        computer,
         process_guid,
         process_id,
         image,
@@ -478,11 +484,16 @@ const BATCH_SIZE: usize = 500;
 ///
 /// `bytes_read` is updated atomically so callers can compute progress as
 /// `bytes_read.load() / file_size`.
+///
+/// `rodeo` is the shared string interner — all `computer`, `image`, and `user`
+/// fields in emitted events are interned keys.  The same `SharedRodeo` must be
+/// used to resolve them later.
 pub fn parse_file(
     path: &Path,
     sender: &crossbeam_channel::Sender<Vec<SysmonEvent>>,
     bytes_read: &Arc<AtomicU64>,
     errors_out: &mut Vec<ParseError>,
+    rodeo: &crate::SharedRodeo,
 ) -> Result<()> {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(64 * 1024, file);
@@ -519,7 +530,7 @@ pub fn parse_file(
 
         // Phase 3: extract typed SysmonEvent
         let mut local_errors = Vec::new();
-        if let Some(event) = extract_event(raw, &fields, line_num, &mut local_errors) {
+        if let Some(event) = extract_event(raw, &fields, line_num, &mut local_errors, rodeo) {
             batch.push(event);
         }
         errors_out.extend(local_errors);

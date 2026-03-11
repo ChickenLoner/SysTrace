@@ -4,6 +4,8 @@ use systrace_core::{EventStore, ProcessGuid, ProcessTree, Timestamp};
 
 use crate::panels::TabState;
 
+pub use systrace_core::SharedRodeo;
+
 /// Event category filter for the process tree.
 /// When any field is true, only processes with matching events are shown.
 #[derive(Debug, Clone, Default)]
@@ -56,11 +58,13 @@ pub struct TimelineState {
     pub zoom: f64,
     /// Seconds offset from the process start time shown at the left edge.
     pub pan_offset: f64,
+    /// When true, telemetry tables are filtered to the visible time window.
+    pub filter_active: bool,
 }
 
 impl Default for TimelineState {
     fn default() -> Self {
-        Self { visible: false, zoom: 0.0, pan_offset: 0.0 }
+        Self { visible: false, zoom: 0.0, pan_offset: 0.0, filter_active: false }
     }
 }
 
@@ -102,6 +106,10 @@ pub struct AppState {
     pub scroll_to_selected: bool,
     /// Timeline panel state.
     pub timeline: TimelineState,
+    /// Shared string interner for `SysmonEvent.computer/image/user` fields.
+    pub rodeo: SharedRodeo,
+    /// Active time range filter for telemetry tables (None = no filter).
+    pub time_range_filter: Option<(Timestamp, Timestamp)>,
 }
 
 impl Default for AppState {
@@ -127,6 +135,8 @@ impl Default for AppState {
             flat_visible: Vec::new(),
             scroll_to_selected: false,
             timeline: TimelineState::default(),
+            rodeo: systrace_core::new_rodeo(),
+            time_range_filter: None,
         }
     }
 }
