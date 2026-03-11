@@ -96,53 +96,68 @@ pub fn render_detection(
     );
 
     let row_height = 18.0_f32;
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .column(Column::initial(80.0))   // Time
-        .column(Column::initial(60.0))   // EventID
-        .column(Column::initial(160.0))  // Type
-        .column(Column::initial(200.0))  // Image
-        .column(Column::initial(120.0))  // Computer
-        .column(Column::remainder())     // Details
-        .header(row_height, |mut header| {
-            for (i, h) in headers.iter().enumerate() {
-                header.col(|ui| {
-                    if ui.button(h).clicked() {
-                        tab.sort.toggle(i);
-                    }
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(row_height, rows.len(), |mut row| {
-                let ri = row.index();
-                let r = &rows[ri];
-                let is_selected = tab.selected_row == Some(ri);
-                row.set_selected(is_selected);
-
-                row.col(|ui| { ui.label(fmt_time(r.time)); });
-                row.col(|ui| { ui.label(r.event_id.to_string()); });
-                row.col(|ui| { ui.label(&r.event_type); });
-                row.col(|ui| { ui.label(&r.image); });
-                row.col(|ui| { ui.label(&r.computer); });
-                row.col(|ui| { ui.label(&r.detail); });
-
-                if row.response().clicked() {
-                    tab.selected_row = Some(ri);
+    egui::ScrollArea::horizontal().show(ui, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .column(Column::initial(170.0).clip(true))  // Time
+            .column(Column::initial(60.0).clip(true))   // EventID
+            .column(Column::initial(160.0).clip(true))  // Type
+            .column(Column::initial(200.0).clip(true))  // Image
+            .column(Column::initial(120.0).clip(true))  // Computer
+            .column(Column::remainder().clip(true).at_least(150.0)) // Details
+            .header(row_height, |mut header| {
+                for (i, h) in headers.iter().enumerate() {
+                    header.col(|ui| {
+                        if ui.button(h).clicked() {
+                            tab.sort.toggle(i);
+                        }
+                    });
                 }
-                row.response().context_menu(|ui| {
-                    if ui.button("Copy Row").clicked() {
-                        ui.output_mut(|o| o.copied_text = r.copy_text());
-                        ui.close_menu();
+            })
+            .body(|body| {
+                body.rows(row_height, rows.len(), |mut row| {
+                    let ri = row.index();
+                    let r = &rows[ri];
+                    let is_selected = tab.selected_row == Some(ri);
+                    row.set_selected(is_selected);
+
+                    row.col(|ui| { ui.label(fmt_time(r.time)); });
+                    row.col(|ui| { ui.label(r.event_id.to_string()); });
+                    row.col(|ui| { ui.label(&r.event_type); });
+                    row.col(|ui| { ui.label(&r.image); });
+                    row.col(|ui| { ui.label(&r.computer); });
+                    row.col(|ui| { ui.label(&r.detail); });
+
+                    if row.response().clicked() {
+                        tab.selected_row = Some(ri);
                     }
-                    if ui.button("Copy Details").clicked() {
-                        ui.output_mut(|o| o.copied_text = r.detail.clone());
-                        ui.close_menu();
-                    }
+                    row.response().context_menu(|ui| {
+                        if ui.button("Copy Row").clicked() {
+                            ui.ctx().copy_text(r.copy_text());
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Copy Time").clicked() {
+                            ui.ctx().copy_text(fmt_time(r.time));
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Image").clicked() {
+                            ui.ctx().copy_text(r.image.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Computer").clicked() {
+                            ui.ctx().copy_text(r.computer.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Details").clicked() {
+                            ui.ctx().copy_text(r.detail.clone());
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
-        });
+    });
 }
 
 // ---------------------------------------------------------------------------

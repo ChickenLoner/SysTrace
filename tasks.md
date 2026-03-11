@@ -297,6 +297,25 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 
 ---
 
+## Phase 6: Bugfixes from Manual Testing
+
+**Source:** `bug.md`
+**Status: ✅ COMPLETE**
+
+### 6.1 Horizontal scrolling for telemetry tables ✅
+- [x] All 7 panel TableBuilders wrapped in `ScrollArea::horizontal`; remainder columns use `.at_least()` for minimum width
+
+### 6.2 Right-click copy per column ✅
+- [x] All 7 panels: context menu has "Copy Row" + per-column items (Copy Time, Copy Source, Copy Details, etc.)
+
+### 6.3 Full timestamp in tables ✅
+- [x] `fmt_time` changed to `%Y-%m-%d %H:%M:%S%.3f`; Time column widened to 170px
+
+### 6.4 Rename Drivers tab ✅
+- [x] Tab label renamed from "Drivers" to "Modules" (covers DriverLoad + ImageLoad)
+
+---
+
 ## Quick Reference
 
 | Phase | Scope | Deliverable | Status |

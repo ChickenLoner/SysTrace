@@ -166,49 +166,71 @@ pub fn render_injection(
     let mut next_selected = selected;
     let rows_ref = &rows;
 
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .sense(egui::Sense::click())
-        .column(Column::initial(90.0).clip(true))
-        .column(Column::initial(110.0).clip(true))
-        .column(Column::initial(65.0).clip(true))
-        .column(Column::initial(200.0).clip(true))
-        .column(Column::initial(200.0).clip(true))
-        .column(Column::remainder().clip(true))
-        .header(20.0, |mut header| {
-            for (i, h) in headers.iter().enumerate() {
-                header.col(|ui| {
-                    if ui.button(h.as_str()).clicked() {
-                        next_sort = Some(i);
-                    }
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(18.0, rows_ref.len(), |mut row| {
-                let i = row.index();
-                let r = &rows_ref[i];
-                row.set_selected(selected == Some(i));
-                row.col(|ui| { ui.label(fmt_time(r.time)); });
-                row.col(|ui| { ui.label(r.kind); });
-                row.col(|ui| { ui.label(r.role); });
-                row.col(|ui| { ui.label(&r.source); });
-                row.col(|ui| { ui.label(&r.target); });
-                row.col(|ui| { ui.label(&r.details); });
-                let resp = row.response();
-                if resp.clicked() {
-                    next_selected = Some(i);
+    egui::ScrollArea::horizontal().show(ui, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .column(Column::initial(170.0).clip(true))
+            .column(Column::initial(110.0).clip(true))
+            .column(Column::initial(65.0).clip(true))
+            .column(Column::initial(200.0).clip(true))
+            .column(Column::initial(200.0).clip(true))
+            .column(Column::remainder().clip(true).at_least(120.0))
+            .header(20.0, |mut header| {
+                for (i, h) in headers.iter().enumerate() {
+                    header.col(|ui| {
+                        if ui.button(h.as_str()).clicked() {
+                            next_sort = Some(i);
+                        }
+                    });
                 }
-                let copy = r.copy_text();
-                resp.context_menu(|ui| {
-                    if ui.button("Copy row").clicked() {
-                        ui.ctx().copy_text(copy.clone());
-                        ui.close_menu();
+            })
+            .body(|body| {
+                body.rows(18.0, rows_ref.len(), |mut row| {
+                    let i = row.index();
+                    let r = &rows_ref[i];
+                    row.set_selected(selected == Some(i));
+                    row.col(|ui| { ui.label(fmt_time(r.time)); });
+                    row.col(|ui| { ui.label(r.kind); });
+                    row.col(|ui| { ui.label(r.role); });
+                    row.col(|ui| { ui.label(&r.source); });
+                    row.col(|ui| { ui.label(&r.target); });
+                    row.col(|ui| { ui.label(&r.details); });
+                    let resp = row.response();
+                    if resp.clicked() {
+                        next_selected = Some(i);
                     }
+                    resp.context_menu(|ui| {
+                        if ui.button("Copy Row").clicked() {
+                            ui.ctx().copy_text(r.copy_text());
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Copy Time").clicked() {
+                            ui.ctx().copy_text(fmt_time(r.time));
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Type").clicked() {
+                            ui.ctx().copy_text(r.kind.to_owned());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Source").clicked() {
+                            ui.ctx().copy_text(r.source.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Target").clicked() {
+                            ui.ctx().copy_text(r.target.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Details").clicked() {
+                            ui.ctx().copy_text(r.details.clone());
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
-        });
+    });
 
     if let Some(col) = next_sort {
         tab.sort.toggle(col);

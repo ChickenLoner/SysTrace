@@ -53,7 +53,7 @@ pub struct TabState {
 
 /// Format a timestamp for compact table display (time only).
 pub fn fmt_time(ts: systrace_core::Timestamp) -> String {
-    ts.format("%H:%M:%S%.3f").to_string()
+    ts.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
 }
 
 /// Render a centred placeholder when there are no events for the active tab.
