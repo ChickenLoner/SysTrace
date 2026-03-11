@@ -1,13 +1,14 @@
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, TryRecvError};
 use eframe::egui::{self, Ui};
-use systrace_core::SysmonEvent;
+use systrace_core::{ProcessGuid, SysmonEvent};
 
 use crate::panels;
-use crate::state::{AppState, FileMetadata, TelemetryTab};
+use crate::state::{AppState, FileMetadata, TelemetryTab, TreeEventFilter};
 
 /// Maximum event batches processed per UI frame to keep the frame time bounded.
 const MAX_BATCHES_PER_FRAME: usize = 20;
@@ -19,6 +20,14 @@ const MAX_BATCHES_PER_FRAME: usize = 20;
 enum LoadMsg {
     Batch(Vec<SysmonEvent>),
     Done { error_count: usize },
+}
+
+// ---------------------------------------------------------------------------
+// Stable tree node ID (independent of UI position)
+// ---------------------------------------------------------------------------
+
+fn tree_node_id(guid: ProcessGuid) -> egui::Id {
+    egui::Id::new(("systrace_node", guid))
 }
 
 // ---------------------------------------------------------------------------
@@ -57,8 +66,9 @@ impl SysTraceApp {
     }
 
     /// Select a process and reset per-tab row selection (keep sort preferences).
-    fn select_process(&mut self, guid: systrace_core::ProcessGuid) {
+    fn select_process(&mut self, guid: ProcessGuid) {
         self.state.selected_process = Some(guid);
+        self.state.scroll_to_selected = true;
         self.state.tab_network.selected_row = None;
         self.state.tab_files.selected_row = None;
         self.state.tab_registry.selected_row = None;
@@ -87,11 +97,9 @@ impl SysTraceApp {
         let bytes_read = self.bytes_read.clone();
 
         std::thread::spawn(move || {
-            // The parser runs in-thread and sends batches directly.
             let (event_tx, event_rx) = crossbeam_channel::bounded::<Vec<SysmonEvent>>(64);
             let error_count = 0usize;
 
-            // Spawn the parser on a separate thread so we can forward and count errors
             {
                 let path2 = path.clone();
                 let br = bytes_read.clone();
@@ -99,16 +107,14 @@ impl SysTraceApp {
                 std::thread::spawn(move || {
                     let mut errors = Vec::new();
                     let _ = systrace_core::parse_file(&path2, &etx, &br, &mut errors);
-                    // etx drops here, signalling done
-                    let _ = errors.len(); // suppress lint
+                    let _ = errors.len();
                 });
             }
-            drop(event_tx); // drop our copy so channel closes when parser is done
+            drop(event_tx);
 
-            // Forward batches to UI thread
             for batch in event_rx {
                 if tx.send(LoadMsg::Batch(batch)).is_err() {
-                    return; // UI dropped the receiver (e.g. another file opened)
+                    return;
                 }
             }
             let _ = tx.send(LoadMsg::Done { error_count });
@@ -128,7 +134,6 @@ impl SysTraceApp {
 
         loop {
             if batches_this_frame >= MAX_BATCHES_PER_FRAME {
-                // Yield to keep the UI responsive; come back next frame.
                 self.rx = Some(rx);
                 return;
             }
@@ -148,7 +153,6 @@ impl SysTraceApp {
                         }
                         self.state.event_store.insert(event);
                     }
-                    // Update progress
                     let read = self.bytes_read.load(Ordering::Relaxed);
                     self.state.loading_progress =
                         Some((read as f32 / file_size as f32).min(0.99));
@@ -158,7 +162,6 @@ impl SysTraceApp {
                     break;
                 }
                 Err(TryRecvError::Empty) => {
-                    // Nothing ready this frame
                     self.rx = Some(rx);
                     let read = self.bytes_read.load(Ordering::Relaxed);
                     self.state.loading_progress =
@@ -171,7 +174,6 @@ impl SysTraceApp {
             }
         }
 
-        // Loop exited via Done or Disconnected — loading is complete.
         self.state.process_tree.finalise();
         self.state.loading_progress = None;
         self.compute_file_metadata();
@@ -218,6 +220,156 @@ impl SysTraceApp {
             time_range,
             computer_names,
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: event filter predicate for tree nodes
+    // -----------------------------------------------------------------------
+
+    fn node_passes_event_filter(&self, guid: &ProcessGuid) -> bool {
+        let f = &self.state.tree_event_filter;
+        if !f.any_active() {
+            return true;
+        }
+        if f.network
+            && !self
+                .state
+                .event_store
+                .events_for_process_and_types(guid, &[3, 22])
+                .is_empty()
+        {
+            return true;
+        }
+        if f.files
+            && !self
+                .state
+                .event_store
+                .events_for_process_and_types(guid, &[11, 15, 23, 26, 27, 28, 29])
+                .is_empty()
+        {
+            return true;
+        }
+        if f.registry
+            && !self
+                .state
+                .event_store
+                .events_for_process_and_types(guid, &[12, 13, 14])
+                .is_empty()
+        {
+            return true;
+        }
+        if f.pipes
+            && !self
+                .state
+                .event_store
+                .events_for_process_and_types(guid, &[17, 18])
+                .is_empty()
+        {
+            return true;
+        }
+        if f.injection
+            && (!self
+                .state
+                .event_store
+                .events_for_process_and_types(guid, &[8, 10, 25])
+                .is_empty()
+                || !self
+                    .state
+                    .event_store
+                    .events_targeting_process(guid)
+                    .is_empty())
+        {
+            return true;
+        }
+        if f.drivers
+            && !self
+                .state
+                .event_store
+                .events_for_process_and_types(guid, &[6, 7])
+                .is_empty()
+        {
+            return true;
+        }
+        false
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: recursively force-open all children in CollapsingState
+    // -----------------------------------------------------------------------
+
+    fn expand_all_children(&self, ctx: &egui::Context, guid: ProcessGuid) {
+        let Some(node) = self.state.process_tree.get(&guid) else {
+            return;
+        };
+        let children = node.children.clone();
+        for child_guid in children {
+            let id = tree_node_id(child_guid);
+            let mut cs =
+                egui::collapsing_header::CollapsingState::load_with_default_open(ctx, id, false);
+            cs.set_open(true);
+            cs.store(ctx);
+            self.expand_all_children(ctx, child_guid);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers: flat visible list for keyboard navigation
+    // -----------------------------------------------------------------------
+
+    fn collect_visible_preorder(
+        &self,
+        ctx: &egui::Context,
+        guid: ProcessGuid,
+        out: &mut Vec<ProcessGuid>,
+    ) {
+        let filter = self.state.search_filter.to_lowercase();
+        let Some(node) = self.state.process_tree.get(&guid) else {
+            return;
+        };
+
+        // Text filter — exact match, no subtree fallback
+        if !filter.is_empty() {
+            let image_lc = node.image_name.as_deref().unwrap_or("?").to_lowercase();
+            let cmd_lc = node.command_line.as_deref().unwrap_or("").to_lowercase();
+            let user_lc = node.user.as_deref().unwrap_or("").to_lowercase();
+            let pid_lc = node.pid.map(|p| p.to_string()).unwrap_or_default();
+            if !image_lc.contains(&filter)
+                && !cmd_lc.contains(&filter)
+                && !user_lc.contains(&filter)
+                && !pid_lc.contains(&filter)
+            {
+                return;
+            }
+        }
+
+        // Event type filter
+        if !self.node_passes_event_filter(&guid) {
+            return;
+        }
+
+        out.push(guid);
+
+        // Recurse into open children
+        if !node.children.is_empty() {
+            let id = tree_node_id(guid);
+            if egui::collapsing_header::CollapsingState::load_with_default_open(ctx, id, false)
+                .is_open()
+            {
+                let children = node.children.clone();
+                for child in children {
+                    self.collect_visible_preorder(ctx, child, out);
+                }
+            }
+        }
+    }
+
+    fn compute_flat_visible(&self, ctx: &egui::Context) -> Vec<ProcessGuid> {
+        let mut out = Vec::new();
+        let roots: Vec<_> = self.state.process_tree.roots().to_vec();
+        for root in roots {
+            self.collect_visible_preorder(ctx, root, &mut out);
+        }
+        out
     }
 
     // -----------------------------------------------------------------------
@@ -284,15 +436,83 @@ impl SysTraceApp {
         ui.heading("Processes");
         ui.separator();
 
-        // Search filter
+        // Stable ID for the search TextEdit (needed for Ctrl+F focus)
+        let search_id = egui::Id::new("process_search");
+
+        // Search filter row
         ui.horizontal(|ui| {
             ui.label("🔍");
-            ui.text_edit_singleline(&mut self.state.search_filter);
+            egui::TextEdit::singleline(&mut self.state.search_filter)
+                .id(search_id)
+                .hint_text("Search image, PID, user, cmd…")
+                .show(ui);
             if !self.state.search_filter.is_empty() && ui.small_button("✕").clicked() {
                 self.state.search_filter.clear();
             }
         });
+
+        // Event type filter checkboxes
+        egui::CollapsingHeader::new("Event Type Filter")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.checkbox(&mut self.state.tree_event_filter.network, "Network");
+                    ui.checkbox(&mut self.state.tree_event_filter.files, "Files");
+                    ui.checkbox(&mut self.state.tree_event_filter.registry, "Registry");
+                    ui.checkbox(&mut self.state.tree_event_filter.pipes, "Pipes");
+                    ui.checkbox(&mut self.state.tree_event_filter.injection, "Injection");
+                    ui.checkbox(&mut self.state.tree_event_filter.drivers, "Drivers");
+                });
+                if self.state.tree_event_filter.any_active()
+                    && ui.small_button("Clear All").clicked()
+                {
+                    self.state.tree_event_filter = TreeEventFilter::default();
+                }
+            });
+
         ui.separator();
+
+        // Keyboard navigation — arrow keys (only when search not focused)
+        let search_focused = ui.ctx().memory(|m| m.has_focus(search_id));
+        if !search_focused {
+            let (down, up) = ui.ctx().input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::ArrowUp),
+                )
+            });
+            if down || up {
+                let flat = self.state.flat_visible.clone();
+                if !flat.is_empty() {
+                    let current_idx = self
+                        .state
+                        .selected_process
+                        .and_then(|sel| flat.iter().position(|&g| g == sel));
+                    let next_idx = match current_idx {
+                        None => 0,
+                        Some(idx) => {
+                            if down {
+                                (idx + 1).min(flat.len() - 1)
+                            } else {
+                                idx.saturating_sub(1)
+                            }
+                        }
+                    };
+                    let next_guid = flat[next_idx];
+                    if self.state.selected_process != Some(next_guid) {
+                        self.select_process(next_guid);
+                    }
+                }
+            }
+        }
+
+        // Ctrl+F: focus search box
+        let do_focus = ui
+            .ctx()
+            .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F));
+        if do_focus {
+            ui.ctx().memory_mut(|m| m.request_focus(search_id));
+        }
 
         if self.state.loading_progress.is_some() {
             ui.label("Loading…");
@@ -309,6 +529,7 @@ impl SysTraceApp {
         }
 
         let roots: Vec<_> = self.state.process_tree.roots().to_vec();
+        let ctx = ui.ctx().clone();
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
@@ -316,45 +537,73 @@ impl SysTraceApp {
                     self.render_tree_node(ui, guid);
                 }
             });
+
+        // Rebuild flat visible list for keyboard navigation (post-render so CollapsingState is up to date)
+        self.state.flat_visible = self.compute_flat_visible(&ctx);
     }
 
-    fn render_tree_node(&mut self, ui: &mut Ui, guid: systrace_core::ProcessGuid) {
+    fn render_tree_node(&mut self, ui: &mut Ui, guid: ProcessGuid) {
         let node = match self.state.process_tree.get(&guid) {
             Some(n) => n,
             None => return,
         };
 
+        // Snapshot all fields we need before releasing the borrow on process_tree
         let image_name = node
             .image_name
             .clone()
             .unwrap_or_else(|| "?".to_owned());
+        let image_full = node.image.clone().unwrap_or_else(|| "?".to_owned());
         let pid_str = node
             .pid
             .map(|p| p.to_string())
             .unwrap_or_else(|| "?".to_owned());
         let is_synthetic = node.is_synthetic;
         let is_terminated = node.end_time.is_some();
+        let cmd = node.command_line.clone().unwrap_or_else(|| "-".to_owned());
+        let user_str = node.user.clone().unwrap_or_else(|| "-".to_owned());
+        let start_str = node.start_time.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+        let children: Vec<_> = node.children.clone();
+        // node borrow on process_tree ends here
 
-        // Filter: skip subtree if no match
+        // Text filter — exact match, no subtree fallback
         let filter = self.state.search_filter.to_lowercase();
         if !filter.is_empty() {
             let image_lc = image_name.to_lowercase();
-            let cmd_lc = node
-                .command_line
-                .as_deref()
-                .unwrap_or("")
-                .to_lowercase();
-            let user_lc = node.user.as_deref().unwrap_or("").to_lowercase();
+            let cmd_lc = cmd.to_lowercase();
+            let user_lc = user_str.to_lowercase();
             let pid_lc = pid_str.to_lowercase();
             let matches_self = image_lc.contains(&filter)
                 || cmd_lc.contains(&filter)
                 || user_lc.contains(&filter)
                 || pid_lc.contains(&filter);
-            // Skip if no match and no children (leaf pruning — simple heuristic)
-            if !matches_self && node.children.is_empty() {
+            if !matches_self {
                 return;
             }
         }
+
+        // Event type filter
+        if !self.node_passes_event_filter(&guid) {
+            return;
+        }
+
+        // Determine injection target and system user for color priority
+        let is_injection_target =
+            !self.state.event_store.events_targeting_process(&guid).is_empty();
+        let is_system = user_str.to_uppercase().contains("SYSTEM");
+
+        // Color priority: synthetic > injection_target > system > terminated > normal
+        let text_color = if is_synthetic {
+            egui::Color32::DARK_GRAY
+        } else if is_injection_target {
+            egui::Color32::from_rgb(220, 60, 60)
+        } else if is_system {
+            egui::Color32::from_rgb(80, 180, 80)
+        } else if is_terminated {
+            egui::Color32::from_rgb(180, 180, 100)
+        } else {
+            ui.visuals().text_color()
+        };
 
         let label = if is_synthetic {
             format!("{image_name} ({pid_str}) [synthetic]")
@@ -362,47 +611,127 @@ impl SysTraceApp {
             format!("{image_name} ({pid_str})")
         };
 
-        let text_color = if is_synthetic {
-            egui::Color32::DARK_GRAY
-        } else if is_terminated {
-            egui::Color32::from_rgb(180, 180, 100) // muted yellow
-        } else {
-            ui.visuals().text_color()
-        };
-
         let is_selected = self.state.selected_process == Some(guid);
-        let children: Vec<_> = node.children.clone();
+        let should_scroll = self.state.scroll_to_selected && is_selected;
+
+        // GUID as hex string for clipboard copy
+        let guid_hex: String = guid.iter().map(|b| format!("{b:02x}")).collect();
+        let cmd_for_copy = cmd.clone();
+
+        // --- Render node (leaf vs collapsible) ---
+        let do_expand = Cell::new(false);
 
         if children.is_empty() {
             let rich = egui::RichText::new(&label).color(text_color);
-            if ui.selectable_label(is_selected, rich).clicked() {
+            let resp = ui.selectable_label(is_selected, rich);
+            if resp.clicked() {
                 self.select_process(guid);
             }
+            if should_scroll {
+                resp.scroll_to_me(Some(egui::Align::Center));
+                self.state.scroll_to_selected = false;
+            }
+            resp.on_hover_ui(|ui| {
+                ui.label(format!("Image: {image_full}"));
+                ui.label(format!("Command: {cmd}"));
+                ui.label(format!("User: {user_str}"));
+                ui.label(format!("Started: {start_str}"));
+            })
+            .context_menu(|ui| {
+                if ui.button("Copy GUID").clicked() {
+                    ui.ctx().copy_text(guid_hex.clone());
+                    ui.close_menu();
+                }
+                if ui.button("Copy Command Line").clicked() {
+                    ui.ctx().copy_text(cmd_for_copy.clone());
+                    ui.close_menu();
+                }
+            });
         } else {
-            let id = ui.make_persistent_id(guid);
-            let state =
-                egui::collapsing_header::CollapsingState::load_with_default_open(
-                    ui.ctx(),
-                    id,
-                    false,
-                );
+            let id = tree_node_id(guid);
+            let cs = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                false,
+            );
 
-            state
-                .show_header(ui, |ui| {
-                    let rich = egui::RichText::new(&label).color(text_color);
-                    if ui.selectable_label(is_selected, rich).clicked() {
-                        self.select_process(guid);
-                    }
+            cs.show_header(ui, |ui| {
+                let rich = egui::RichText::new(&label).color(text_color);
+                let resp = ui.selectable_label(is_selected, rich);
+                if resp.clicked() {
+                    self.select_process(guid);
+                }
+                if should_scroll {
+                    resp.scroll_to_me(Some(egui::Align::Center));
+                    self.state.scroll_to_selected = false;
+                }
+                resp.on_hover_ui(|ui| {
+                    ui.label(format!("Image: {image_full}"));
+                    ui.label(format!("Command: {cmd}"));
+                    ui.label(format!("User: {user_str}"));
+                    ui.label(format!("Started: {start_str}"));
                 })
-                .body(|ui| {
-                    for child in children {
-                        self.render_tree_node(ui, child);
+                .context_menu(|ui| {
+                    if ui.button("Copy GUID").clicked() {
+                        ui.ctx().copy_text(guid_hex.clone());
+                        ui.close_menu();
+                    }
+                    if ui.button("Copy Command Line").clicked() {
+                        ui.ctx().copy_text(cmd_for_copy.clone());
+                        ui.close_menu();
+                    }
+                    if ui.button("Expand All Children").clicked() {
+                        do_expand.set(true);
+                        ui.close_menu();
                     }
                 });
+            })
+            .body(|ui| {
+                for child in children {
+                    self.render_tree_node(ui, child);
+                }
+            });
+        }
+
+        if do_expand.get() {
+            let ctx = ui.ctx().clone();
+            // Also open this node itself
+            let mut cs =
+                egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, tree_node_id(guid), false);
+            cs.set_open(true);
+            cs.store(&ctx);
+            self.expand_all_children(&ctx, guid);
         }
     }
 
     fn render_telemetry_panel(&mut self, ui: &mut Ui) {
+        // Ctrl+Tab / Ctrl+Shift+Tab: cycle through tabs
+        let tabs = [
+            TelemetryTab::Overview,
+            TelemetryTab::Network,
+            TelemetryTab::FileActivity,
+            TelemetryTab::Registry,
+            TelemetryTab::Pipes,
+            TelemetryTab::Injection,
+            TelemetryTab::DriversModules,
+        ];
+        let (tab_forward, tab_backward) = ui.ctx().input(|i| {
+            (
+                i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Tab),
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Tab),
+            )
+        });
+        if tab_forward || tab_backward {
+            if let Some(idx) = tabs.iter().position(|&t| t == self.state.active_tab) {
+                let next = if tab_forward {
+                    (idx + 1).rem_euclid(tabs.len())
+                } else {
+                    (idx + tabs.len() - 1).rem_euclid(tabs.len())
+                };
+                self.state.active_tab = tabs[next];
+            }
+        }
+
         // Tab bar
         ui.horizontal(|ui| {
             for (tab, label) in [
@@ -422,6 +751,20 @@ impl SysTraceApp {
                 }
             }
         });
+
+        // Global telemetry filter bar (shown for all non-Overview tabs)
+        if self.state.active_tab != TelemetryTab::Overview {
+            ui.horizontal(|ui| {
+                ui.label("🔍");
+                egui::TextEdit::singleline(&mut self.state.telemetry_filter)
+                    .hint_text("Filter rows…")
+                    .show(ui);
+                if !self.state.telemetry_filter.is_empty() && ui.small_button("✕").clicked() {
+                    self.state.telemetry_filter.clear();
+                }
+            });
+        }
+
         ui.separator();
 
         // Show loading progress bar in central panel if loading
@@ -444,46 +787,85 @@ impl SysTraceApp {
             return;
         }
 
+        // Clone filter to avoid borrow conflict with &mut self in panel calls
+        let filter = self.state.telemetry_filter.clone();
+
         match self.state.active_tab {
             TelemetryTab::Overview => self.render_overview(ui),
             TelemetryTab::Network => {
                 if let Some(guid) = self.state.selected_process {
-                    panels::network::render_network(ui, &self.state.event_store, guid, &mut self.state.tab_network);
+                    panels::network::render_network(
+                        ui,
+                        &self.state.event_store,
+                        guid,
+                        &mut self.state.tab_network,
+                        &filter,
+                    );
                 } else {
                     panels::render_no_selection(ui);
                 }
             }
             TelemetryTab::FileActivity => {
                 if let Some(guid) = self.state.selected_process {
-                    panels::file_activity::render_file_activity(ui, &self.state.event_store, guid, &mut self.state.tab_files);
+                    panels::file_activity::render_file_activity(
+                        ui,
+                        &self.state.event_store,
+                        guid,
+                        &mut self.state.tab_files,
+                        &filter,
+                    );
                 } else {
                     panels::render_no_selection(ui);
                 }
             }
             TelemetryTab::Registry => {
                 if let Some(guid) = self.state.selected_process {
-                    panels::registry::render_registry(ui, &self.state.event_store, guid, &mut self.state.tab_registry);
+                    panels::registry::render_registry(
+                        ui,
+                        &self.state.event_store,
+                        guid,
+                        &mut self.state.tab_registry,
+                        &filter,
+                    );
                 } else {
                     panels::render_no_selection(ui);
                 }
             }
             TelemetryTab::Pipes => {
                 if let Some(guid) = self.state.selected_process {
-                    panels::pipes::render_pipes(ui, &self.state.event_store, guid, &mut self.state.tab_pipes);
+                    panels::pipes::render_pipes(
+                        ui,
+                        &self.state.event_store,
+                        guid,
+                        &mut self.state.tab_pipes,
+                        &filter,
+                    );
                 } else {
                     panels::render_no_selection(ui);
                 }
             }
             TelemetryTab::Injection => {
                 if let Some(guid) = self.state.selected_process {
-                    panels::injection::render_injection(ui, &self.state.event_store, guid, &mut self.state.tab_injection);
+                    panels::injection::render_injection(
+                        ui,
+                        &self.state.event_store,
+                        guid,
+                        &mut self.state.tab_injection,
+                        &filter,
+                    );
                 } else {
                     panels::render_no_selection(ui);
                 }
             }
             TelemetryTab::DriversModules => {
                 if let Some(guid) = self.state.selected_process {
-                    panels::drivers::render_drivers(ui, &self.state.event_store, guid, &mut self.state.tab_drivers);
+                    panels::drivers::render_drivers(
+                        ui,
+                        &self.state.event_store,
+                        guid,
+                        &mut self.state.tab_drivers,
+                        &filter,
+                    );
                 } else {
                     panels::render_no_selection(ui);
                 }
@@ -591,13 +973,13 @@ impl SysTraceApp {
                         ui.end_row();
 
                         let categories: &[(&str, &str, &[u16])] = &[
-                            ("Network",   "3, 22",               &[3, 22]),
-                            ("Files",     "11,15,23,26,27,28,29",&[11, 15, 23, 26, 27, 28, 29]),
-                            ("Registry",  "12, 13, 14",          &[12, 13, 14]),
-                            ("Pipes",     "17, 18",              &[17, 18]),
-                            ("Injection", "8, 10, 25",           &[8, 10, 25]),
-                            ("Drivers",   "6, 7",                &[6, 7]),
-                            ("Other",     "9, 16, 24",           &[9, 16, 24]),
+                            ("Network",   "3, 22",                &[3, 22]),
+                            ("Files",     "11,15,23,26,27,28,29", &[11, 15, 23, 26, 27, 28, 29]),
+                            ("Registry",  "12, 13, 14",           &[12, 13, 14]),
+                            ("Pipes",     "17, 18",               &[17, 18]),
+                            ("Injection", "8, 10, 25",            &[8, 10, 25]),
+                            ("Drivers",   "6, 7",                 &[6, 7]),
+                            ("Other",     "9, 16, 24",            &[9, 16, 24]),
                         ];
 
                         for (name, ids_str, ids) in categories {

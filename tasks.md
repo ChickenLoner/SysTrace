@@ -177,45 +177,43 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 
 ---
 
-## Phase 4A: UX Polish
+## Phase 4A: UX Polish ✅ COMPLETE
 
 **Goal:** Search refinements, tree polish, keyboard navigation.
-**Status: 🔄 IN PROGRESS**
+**Status: ✅ COMPLETE**
 
-### 4A.0 State scaffolding ✅ DONE
+### 4A.0 State scaffolding ✅
 - [x] `state.rs`: added `TreeEventFilter` struct (network/files/registry/pipes/injection/drivers bool fields + `any_active()`)
 - [x] `state.rs`: added `AppState` fields: `telemetry_filter: String`, `tree_event_filter: TreeEventFilter`, `flat_visible: Vec<ProcessGuid>`, `scroll_to_selected: bool` — all initialised in `Default`
 
-### 4A.1 Search & Filter ⬜ NEXT
+### 4A.1 Search & Filter ✅
 - [x] Process tree text filter (search by image name, PID, command line, user)
-- [x] **All 6 panel render functions** (`render_network`, `render_file_activity`, `render_registry`, `render_pipes`, `render_injection`, `render_drivers`) now accept `filter: &str` param — `rows.retain(|r| r.copy_text().to_lowercase().contains(&f))` applied after building rows
-- [ ] **`app.rs` – exact-match tree filter**: change `render_tree_node` line 354 from `if !matches_self && node.children.is_empty()` → `if !matches_self { return; }` (no subtree fallback)
-- [ ] **`app.rs` – event type filter checkboxes**: add `CollapsingHeader("Event Type Filter")` in `render_process_tree_panel` with 6 `ui.checkbox` calls bound to `self.state.tree_event_filter.*`; add clear button when any active; call `self.node_passes_event_filter(guid)` in `render_tree_node` (return early if false)
-- [ ] **`app.rs` – global telemetry filter bar**: in `render_telemetry_panel`, show a `TextEdit` bound to `self.state.telemetry_filter` above the tab separator (skip for Overview tab); pass `&self.state.telemetry_filter` to all 6 panel calls (requires clone to avoid borrow conflict)
+- [x] All 6 panel render functions accept `filter: &str` param with `rows.retain` applied
+- [x] `app.rs` – exact-match tree filter: `if !matches_self { return; }` (no subtree fallback)
+- [x] `app.rs` – event type filter checkboxes: `CollapsingHeader("Event Type Filter")` with 6 checkboxes + clear button
+- [x] `app.rs` – global telemetry filter bar: `TextEdit` above tabs (non-Overview); filter cloned and passed to all 6 panel calls
 
-### 4A.2 Process Tree Polish ⬜ NEXT
+### 4A.2 Process Tree Polish ✅
 - [x] Color coding: yellow (terminated), gray (synthetic)
-- [ ] **`app.rs` – stable node IDs**: replace `ui.make_persistent_id(guid)` with free function `fn tree_node_id(guid: ProcessGuid) -> egui::Id { egui::Id::new(("systrace_node", guid)) }` — needed for expand_all_children and flat_visible to work with same IDs as render
-- [ ] **`app.rs` – color priority**: add `let is_injection_target = !self.state.event_store.events_targeting_process(&guid).is_empty(); let is_system = user.to_uppercase().contains("SYSTEM");` then: synthetic=DARK_GRAY > injection_target=`Color32::from_rgb(220,60,60)` > system=`Color32::from_rgb(80,180,80)` > terminated=`Color32::from_rgb(180,180,100)` > normal
-- [ ] **`app.rs` – node tooltip**: snapshot `image_full`, `cmd`, `user`, `start_str` from node before closures; inside show_header closure: `resp.on_hover_ui(|ui| { ui.label(…) … })`
-- [ ] **`app.rs` – context menu**: 3 buttons: "Copy GUID" (format guid as `{:02x?}` hex), "Copy Command Line", "Expand All Children" (sets `do_expand = Cell::new(false)`; after closures: `if do_expand.get() { self.expand_all_children(ui.ctx(), guid); }`)
-- [ ] **`app.rs` – scroll to selected**: add `self.state.scroll_to_selected = true;` to `select_process()`; in `render_tree_node` snapshot `let should_scroll = self.state.scroll_to_selected && is_selected;`; call `resp.scroll_to_me(Some(egui::Align::Center))` when true; set `self.state.scroll_to_selected = false` after
+- [x] `app.rs` – stable node IDs: `fn tree_node_id(guid) -> egui::Id { egui::Id::new(("systrace_node", guid)) }`
+- [x] `app.rs` – color priority: synthetic=DARK_GRAY > injection_target=red(220,60,60) > system=green(80,180,80) > terminated=yellow(180,180,100) > normal
+- [x] `app.rs` – node tooltip: `resp.on_hover_ui` showing image, command, user, start time
+- [x] `app.rs` – context menu: "Copy GUID", "Copy Command Line", "Expand All Children" (with `Cell<bool>` pattern)
+- [x] `app.rs` – scroll to selected: `scroll_to_selected = true` in `select_process()`; `resp.scroll_to_me` in render
 
-### 4A.3 Keyboard Navigation ⬜ NEXT
-- [ ] **`app.rs` – flat_visible rebuild**: at end of `render_process_tree_panel` after scroll area: `let ctx = ui.ctx().clone(); self.state.flat_visible = self.compute_flat_visible(&ctx);`
-- [ ] **`app.rs` – helper `collect_visible_preorder`**: traverses ProcessTree in pre-order DFS; applies same search filter + `node_passes_event_filter`; for nodes with children, recurses only if `CollapsingState::load_with_default_open(ctx, tree_node_id(guid), false).is_open()`
-- [ ] **`app.rs` – helper `compute_flat_visible`**: calls `collect_visible_preorder` for each root; returns `Vec<ProcessGuid>`
-- [ ] **`app.rs` – arrow key nav**: in `render_process_tree_panel`, check `ui.ctx().input(|i| …)` for `ArrowDown`/`ArrowUp`; find current index in `self.state.flat_visible`; clamp next index; call `self.select_process(next_guid)` — only when search TextEdit is NOT focused (`ui.ctx().memory(|m| m.has_focus(search_id))`)
-- [ ] **`app.rs` – Ctrl+Tab tab switching**: in `render_telemetry_panel`, check `i.modifiers.ctrl && i.key_pressed(Key::Tab)` for next tab, add `&& i.modifiers.shift` for prev; cycle through 7-element tab array with `rem_euclid`
-- [ ] **`app.rs` – Ctrl+F search focus**: after rendering the search TextEdit, check `ctrl && Key::F`; call `ui.ctx().memory_mut(|m| m.request_focus(search_id))`
+### 4A.3 Keyboard Navigation ✅
+- [x] `app.rs` – flat_visible rebuild: after scroll area `self.state.flat_visible = self.compute_flat_visible(&ctx)`
+- [x] `app.rs` – `collect_visible_preorder`: pre-order DFS applying search + event filter + open-state check
+- [x] `app.rs` – `compute_flat_visible`: calls `collect_visible_preorder` for each root
+- [x] `app.rs` – arrow key nav: ArrowDown/ArrowUp cycles through `flat_visible` (skipped when search focused)
+- [x] `app.rs` – Ctrl+Tab / Ctrl+Shift+Tab: cycle through 7-element tab array with `rem_euclid`
+- [x] `app.rs` – Ctrl+F: focuses search TextEdit
 
-### 4A.4 New helper methods to add to `SysTraceApp` in `app.rs`
-```rust
-fn node_passes_event_filter(&self, guid: ProcessGuid) -> bool { … } // check tree_event_filter
-fn expand_all_children(&self, ctx: &egui::Context, guid: ProcessGuid) { … } // recursive CollapsingState force-open
-fn collect_visible_preorder(&self, ctx: &egui::Context, guid: ProcessGuid, out: &mut Vec<ProcessGuid>) { … }
-fn compute_flat_visible(&self, ctx: &egui::Context) -> Vec<ProcessGuid> { … }
-```
+### 4A.4 Helper methods ✅
+- [x] `node_passes_event_filter(&self, guid: &ProcessGuid) -> bool`
+- [x] `expand_all_children(&self, ctx, guid)` — recursive CollapsingState force-open
+- [x] `collect_visible_preorder(&self, ctx, guid, out)`
+- [x] `compute_flat_visible(&self, ctx) -> Vec<ProcessGuid>`
 
 ---
 
@@ -290,7 +288,7 @@ fn compute_flat_visible(&self, ctx: &egui::Context) -> Vec<ProcessGuid> { … }
 | 1 | Core Engine | `systrace-core` lib: parse → ProcessTree + EventStore | ✅ Done |
 | 2 | Basic GUI | Working app: load file, tree, overview panel | ✅ Done |
 | 3 | Full Telemetry | All 7 telemetry tabs with virtual-scrolled tables | ✅ Done |
-| 4A | UX Polish | Search/filter, tree polish, keyboard nav | ⬜ |
+| 4A | UX Polish | Search/filter, tree polish, keyboard nav | ✅ Done |
 | 4B | Timeline | Interactive timeline visualization | ⬜ |
 | 4C | Performance | Benchmarks, string interning, virtual scroll opt | ⬜ |
 | 5 | Advanced | Sigma rules, query DSL, multi-host, export | ⬜ |
