@@ -1504,7 +1504,7 @@ impl SysTraceApp {
                 (TelemetryTab::Registry, "Registry"),
                 (TelemetryTab::Pipes, "Pipes"),
                 (TelemetryTab::Injection, "Injection"),
-                (TelemetryTab::DriversModules, "Drivers"),
+                (TelemetryTab::DriversModules, "Modules"),
                 (TelemetryTab::Detection, "🔍 Hunt"),
             ] {
                 if ui

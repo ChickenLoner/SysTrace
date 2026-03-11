@@ -133,7 +133,6 @@ pub fn render_network(
         _ => {}
     }
 
-    // Snapshot Copy values for closures
     let selected = tab.selected_row;
     let headers = make_headers(
         &["Time", "Direction", "Protocol", "Source", "Destination", "Hostname"],
@@ -144,53 +143,78 @@ pub fn render_network(
     let mut next_selected = selected;
     let rows_ref = &rows;
 
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .sense(egui::Sense::click())
-        .column(Column::initial(90.0).clip(true))
-        .column(Column::initial(75.0).clip(true))
-        .column(Column::initial(55.0).clip(true))
-        .column(Column::initial(135.0).clip(true))
-        .column(Column::initial(135.0).clip(true))
-        .column(Column::remainder().clip(true))
-        .header(20.0, |mut header| {
-            for (i, h) in headers.iter().enumerate() {
-                header.col(|ui| {
-                    if ui.button(h.as_str()).clicked() {
-                        next_sort = Some(i);
-                    }
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(18.0, rows_ref.len(), |mut row| {
-                let i = row.index();
-                let r = &rows_ref[i];
-                row.set_selected(selected == Some(i));
-                row.col(|ui| { ui.label(fmt_time(r.time)); });
-                row.col(|ui| { ui.label(r.direction); });
-                row.col(|ui| { ui.label(&r.protocol); });
-                row.col(|ui| { ui.label(&r.source); });
-                row.col(|ui| { ui.label(&r.destination); });
-                row.col(|ui| { ui.label(&r.hostname); });
-                let resp = row.response();
-                if resp.clicked() {
-                    next_selected = Some(i);
+    egui::ScrollArea::horizontal().show(ui, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .column(Column::initial(170.0).clip(true))
+            .column(Column::initial(75.0).clip(true))
+            .column(Column::initial(55.0).clip(true))
+            .column(Column::initial(135.0).clip(true))
+            .column(Column::initial(135.0).clip(true))
+            .column(Column::remainder().clip(true).at_least(120.0))
+            .header(20.0, |mut header| {
+                for (i, h) in headers.iter().enumerate() {
+                    header.col(|ui| {
+                        if ui.button(h.as_str()).clicked() {
+                            next_sort = Some(i);
+                        }
+                    });
                 }
-                let copy = r.copy_text();
-                resp.context_menu(|ui| {
-                    if ui.button("Copy row").clicked() {
-                        ui.ctx().copy_text(copy.clone());
-                        ui.close_menu();
+            })
+            .body(|body| {
+                body.rows(18.0, rows_ref.len(), |mut row| {
+                    let i = row.index();
+                    let r = &rows_ref[i];
+                    row.set_selected(selected == Some(i));
+                    row.col(|ui| { ui.label(fmt_time(r.time)); });
+                    row.col(|ui| { ui.label(r.direction); });
+                    row.col(|ui| { ui.label(&r.protocol); });
+                    row.col(|ui| { ui.label(&r.source); });
+                    row.col(|ui| { ui.label(&r.destination); });
+                    row.col(|ui| { ui.label(&r.hostname); });
+                    let resp = row.response();
+                    if resp.clicked() {
+                        next_selected = Some(i);
                     }
+                    resp.context_menu(|ui| {
+                        if ui.button("Copy Row").clicked() {
+                            ui.ctx().copy_text(r.copy_text());
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Copy Time").clicked() {
+                            ui.ctx().copy_text(fmt_time(r.time));
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Direction").clicked() {
+                            ui.ctx().copy_text(r.direction.to_owned());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Protocol").clicked() {
+                            ui.ctx().copy_text(r.protocol.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Source").clicked() {
+                            ui.ctx().copy_text(r.source.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Destination").clicked() {
+                            ui.ctx().copy_text(r.destination.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Hostname").clicked() {
+                            ui.ctx().copy_text(r.hostname.clone());
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
-        });
+    });
 
     if let Some(col) = next_sort {
         tab.sort.toggle(col);
     }
     tab.selected_row = next_selected;
 }
-
