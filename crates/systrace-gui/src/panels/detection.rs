@@ -96,16 +96,16 @@ pub fn render_detection(
     );
 
     let row_height = 18.0_f32;
-    egui::ScrollArea::horizontal().show(ui, |ui| {
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
-            .column(Column::initial(170.0).clip(true))  // Time
-            .column(Column::initial(60.0).clip(true))   // EventID
-            .column(Column::initial(160.0).clip(true))  // Type
-            .column(Column::initial(200.0).clip(true))  // Image
-            .column(Column::initial(120.0).clip(true))  // Computer
-            .column(Column::remainder().clip(true).at_least(150.0)) // Details
+            .column(Column::initial(185.0).clip(true))  // Time
+            .column(Column::initial(65.0).clip(true))   // EventID
+            .column(Column::initial(175.0).clip(true))  // Type
+            .column(Column::initial(220.0).clip(true))  // Image
+            .column(Column::initial(140.0).clip(true))  // Computer
+            .column(Column::remainder().clip(true).at_least(180.0)) // Details
             .header(row_height, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {

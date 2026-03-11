@@ -52,31 +52,6 @@ pub struct FileMetadata {
     pub computer_names: HashSet<String>,
 }
 
-/// Zoom / pan state for the timeline panel.
-#[derive(Debug, Clone)]
-pub struct TimelineState {
-    pub visible: bool,
-    /// Pixels per second. 0.0 means "auto-fit on next render".
-    pub zoom: f64,
-    /// Seconds offset from the process start time shown at the left edge.
-    pub pan_offset: f64,
-    /// When true, telemetry tables are filtered to the visible time window.
-    pub filter_active: bool,
-}
-
-impl Default for TimelineState {
-    fn default() -> Self {
-        Self { visible: false, zoom: 0.0, pan_offset: 0.0, filter_active: false }
-    }
-}
-
-impl TimelineState {
-    /// Reset zoom/pan so the next render auto-fits the process range.
-    pub fn reset(&mut self) {
-        self.zoom = 0.0;
-        self.pan_offset = 0.0;
-    }
-}
 
 /// All application state owned by the main thread.
 pub struct AppState {
@@ -98,7 +73,6 @@ pub struct AppState {
     pub tab_pipes: TabState,
     pub tab_injection: TabState,
     pub tab_drivers: TabState,
-    pub tab_findings: TabState,
     /// Global text filter applied to all telemetry table panels simultaneously.
     pub telemetry_filter: String,
     /// Event category checkboxes for narrowing the process tree.
@@ -107,8 +81,6 @@ pub struct AppState {
     pub flat_visible: Vec<ProcessGuid>,
     /// When true, the next render of the selected node calls scroll_to_me().
     pub scroll_to_selected: bool,
-    /// Timeline panel state.
-    pub timeline: TimelineState,
     /// Shared string interner for `SysmonEvent.computer/image/user` fields.
     pub rodeo: SharedRodeo,
     /// Active time range filter for telemetry tables (None = no filter).
@@ -122,10 +94,17 @@ pub struct AppState {
     pub bookmarks: HashMap<ProcessGuid, String>,
     /// Recently opened file paths (most recent first, max 10).
     pub recent_files: Vec<PathBuf>,
-    /// Current query DSL text in the Detection tab.
-    pub query_text: String,
-    /// Event indices that matched the last query run.
-    pub query_results: Vec<usize>,
+    // ── Hunt tab ─────────────────────────────────────────────────────────────
+    /// Text filter used in the Hunt tab to narrow down the process list.
+    pub hunt_filter: String,
+    /// Processes checked/selected in the Hunt tab for timeline generation.
+    pub hunt_checked: HashSet<ProcessGuid>,
+    /// Whether the Hunt timeline popup is currently open.
+    pub hunt_popup_open: bool,
+    /// Pixels-per-second zoom for the hunt timeline popup (0 = auto-fit).
+    pub hunt_zoom: f64,
+    /// Seconds offset from global start shown at left edge of popup.
+    pub hunt_pan: f64,
 }
 
 impl Default for AppState {
@@ -146,20 +125,21 @@ impl Default for AppState {
             tab_pipes: TabState::default(),
             tab_injection: TabState::default(),
             tab_drivers: TabState::default(),
-            tab_findings: TabState::default(),
             telemetry_filter: String::new(),
             tree_event_filter: TreeEventFilter::default(),
             flat_visible: Vec::new(),
             scroll_to_selected: false,
-            timeline: TimelineState::default(),
             rodeo: systrace_core::new_rodeo(),
             time_range_filter: None,
             selected_host: None,
             dark_mode: true,
             bookmarks: HashMap::new(),
             recent_files: Vec::new(),
-            query_text: String::new(),
-            query_results: Vec::new(),
+            hunt_filter: String::new(),
+            hunt_checked: HashSet::new(),
+            hunt_popup_open: false,
+            hunt_zoom: 0.0,
+            hunt_pan: 0.0,
         }
     }
 }

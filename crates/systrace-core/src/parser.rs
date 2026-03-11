@@ -118,7 +118,11 @@ pub fn parse_payload(payload: &str) -> Result<HashMap<String, String>, serde_jso
 }
 
 /// Double any backslash that is NOT already part of a recognised JSON escape
-/// sequence (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`).
+/// sequence (`\"`, `\\`, `\/`, `\uXXXX`).
+///
+/// Note: `\b`, `\f`, `\n`, `\r`, `\t` are valid JSON escapes but EVTXECmd
+/// never intentionally produces them — they are Windows path separators that
+/// were not double-escaped.  We treat them as stray backslashes too.
 fn fix_unescaped_backslashes(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(s.len() + 32);
@@ -131,8 +135,8 @@ fn fix_unescaped_backslashes(s: &str) -> String {
         }
         // We have a backslash — check what follows.
         match bytes.get(i + 1).copied() {
-            Some(b'"') | Some(b'\\') | Some(b'/') | Some(b'b')
-            | Some(b'f') | Some(b'n') | Some(b'r') | Some(b't') => {
+            // Only keep escapes that EVTXECmd truly intends: \", \\, \/
+            Some(b'"') | Some(b'\\') | Some(b'/') => {
                 out.push(b'\\');
                 out.push(bytes[i + 1]);
                 i += 2;
@@ -511,11 +515,25 @@ pub fn parse_file(
         }
 
         // Phase 1: deserialize top-level record
-        let raw: RawEvtxRecord = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                errors_out.push(ParseError::TopLevelDeserialize { line: line_num, source: e });
-                continue;
+        // Apply the same lenient backslash fix as parse_payload: EVTXECmd may
+        // write single backslashes (including \r, \t, \n, etc.) directly in
+        // JSON strings.  Try strict parse first; fall back to the fixed line.
+        let raw: RawEvtxRecord = {
+            match serde_json::from_str(&line) {
+                Ok(r) => r,
+                Err(first_err) => {
+                    let fixed = fix_unescaped_backslashes(&line);
+                    match serde_json::from_str::<RawEvtxRecord>(&fixed) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            errors_out.push(ParseError::TopLevelDeserialize {
+                                line: line_num,
+                                source: first_err,
+                            });
+                            continue;
+                        }
+                    }
+                }
             }
         };
 
@@ -563,6 +581,21 @@ mod tests {
         let map = parse_payload(payload).unwrap();
         assert_eq!(map.get("ProcessGuid").unwrap(), "{abc}");
         assert_eq!(map.get("Image").unwrap(), "C:\\foo.exe");
+    }
+
+    #[test]
+    fn parse_payload_unescaped_backslash_paths() {
+        // Simulates EVTXECmd output with single backslashes (not doubled).
+        // \w, \S, \c are invalid JSON escapes; \t and \r are valid JSON escapes
+        // that EVTXECmd never intends as control characters.
+        let payload = "{\"EventData\":{\"Data\":[{\"@Name\":\"CommandLine\",\"#text\":\"rundll32.exe C:\\windows\\System32\\comsvcs.dll, MiniDump 624 C:\\temp\\lsass.dmp full\"}]}}";
+        let map = parse_payload(payload).unwrap();
+        let cmd = map.get("CommandLine").unwrap();
+        assert!(cmd.contains("C:\\windows"), "expected backslash before 'windows', got: {cmd}");
+        assert!(cmd.contains("\\System32"), "expected backslash before 'System32', got: {cmd}");
+        assert!(cmd.contains("\\comsvcs"), "expected backslash before 'comsvcs', got: {cmd}");
+        assert!(cmd.contains("C:\\temp"), "expected backslash before 'temp', got: {cmd}");
+        assert!(cmd.contains("\\lsass"), "expected backslash before 'lsass', got: {cmd}");
     }
 
     #[test]

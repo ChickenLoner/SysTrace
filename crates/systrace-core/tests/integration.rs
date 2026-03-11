@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use systrace_core::{
-    EventStore, ProcessTree,
+    EventStore, ProcessTree, SharedRodeo,
     event::SysmonEventType,
     parser::{parse_file, parse_payload},
     types::{parse_guid, parse_mitre_rule_name},
@@ -25,6 +25,7 @@ fn load_sample() -> (EventStore, ProcessTree, usize) {
     let path = sample_path();
     assert!(path.exists(), "Sample file not found at {:?}", path);
 
+    let rodeo: SharedRodeo = Arc::new(lasso::ThreadedRodeo::default());
     let (tx, rx) = crossbeam_channel::bounded(256);
     let bytes_read = Arc::new(AtomicU64::new(0));
     let mut errors: Vec<systrace_core::ParseError> = Vec::new();
@@ -33,8 +34,9 @@ fn load_sample() -> (EventStore, ProcessTree, usize) {
         let path2 = path.clone();
         let br = bytes_read.clone();
         let tx2 = tx.clone();
+        let rodeo2 = rodeo.clone();
         std::thread::spawn(move || {
-            let _ = parse_file(&path2, &tx2, &br, &mut Vec::new());
+            let _ = parse_file(&path2, &tx2, &br, &mut Vec::new(), &rodeo2);
         });
     }
     drop(tx); // close sender side so channel eventually empties
@@ -45,7 +47,7 @@ fn load_sample() -> (EventStore, ProcessTree, usize) {
     for batch in &rx {
         for event in batch {
             if event.event_id == 1 {
-                process_tree.insert_process_create(&event);
+                process_tree.insert_process_create(&event, &rodeo);
             } else if event.event_id == 5 {
                 if let Some(guid) = event.process_guid {
                     process_tree.update_process_terminate(guid, event.time_created);

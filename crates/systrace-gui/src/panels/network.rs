@@ -143,17 +143,17 @@ pub fn render_network(
     let mut next_selected = selected;
     let rows_ref = &rows;
 
-    egui::ScrollArea::horizontal().show(ui, |ui| {
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .sense(egui::Sense::click())
-            .column(Column::initial(170.0).clip(true))
-            .column(Column::initial(75.0).clip(true))
-            .column(Column::initial(55.0).clip(true))
-            .column(Column::initial(135.0).clip(true))
-            .column(Column::initial(135.0).clip(true))
-            .column(Column::remainder().clip(true).at_least(120.0))
+            .column(Column::initial(185.0).clip(true))  // Time
+            .column(Column::initial(90.0).clip(true))   // Direction
+            .column(Column::initial(70.0).clip(true))   // Protocol
+            .column(Column::initial(160.0).clip(true))  // Source
+            .column(Column::initial(160.0).clip(true))  // Destination
+            .column(Column::remainder().clip(true).at_least(160.0)) // Hostname
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {

@@ -166,17 +166,17 @@ pub fn render_injection(
     let mut next_selected = selected;
     let rows_ref = &rows;
 
-    egui::ScrollArea::horizontal().show(ui, |ui| {
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .sense(egui::Sense::click())
-            .column(Column::initial(170.0).clip(true))
-            .column(Column::initial(110.0).clip(true))
-            .column(Column::initial(65.0).clip(true))
-            .column(Column::initial(200.0).clip(true))
-            .column(Column::initial(200.0).clip(true))
-            .column(Column::remainder().clip(true).at_least(120.0))
+            .column(Column::initial(185.0).clip(true))  // Time
+            .column(Column::initial(130.0).clip(true))  // Type
+            .column(Column::initial(80.0).clip(true))   // Role
+            .column(Column::initial(220.0).clip(true))  // Source
+            .column(Column::initial(220.0).clip(true))  // Target
+            .column(Column::remainder().clip(true).at_least(160.0)) // Details
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {

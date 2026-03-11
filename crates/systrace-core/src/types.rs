@@ -65,7 +65,12 @@ pub fn parse_guid_opt(s: &str) -> Result<Option<ProcessGuid>, uuid::Error> {
     if trimmed.is_empty() || trimmed == "-" {
         return Ok(None);
     }
-    parse_guid(trimmed).map(Some)
+    let guid = parse_guid(trimmed)?;
+    // Sysmon uses the all-zeros GUID as a null sentinel (parent not available)
+    if guid == [0u8; 16] {
+        return Ok(None);
+    }
+    Ok(Some(guid))
 }
 
 /// Parse a MITRE technique reference from RuleName.
@@ -110,6 +115,13 @@ mod tests {
     fn parse_guid_opt_empty() {
         assert_eq!(parse_guid_opt("").unwrap(), None);
         assert_eq!(parse_guid_opt("-").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_guid_opt_all_zeros_is_none() {
+        // Sysmon uses all-zeros GUID as null sentinel
+        assert_eq!(parse_guid_opt("00000000-0000-0000-0000-000000000000").unwrap(), None);
+        assert_eq!(parse_guid_opt("{00000000-0000-0000-0000-000000000000}").unwrap(), None);
     }
 
     #[test]
