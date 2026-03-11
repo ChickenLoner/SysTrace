@@ -48,6 +48,30 @@ pub struct FileMetadata {
     pub computer_names: HashSet<String>,
 }
 
+/// Zoom / pan state for the timeline panel.
+#[derive(Debug, Clone)]
+pub struct TimelineState {
+    pub visible: bool,
+    /// Pixels per second. 0.0 means "auto-fit on next render".
+    pub zoom: f64,
+    /// Seconds offset from the process start time shown at the left edge.
+    pub pan_offset: f64,
+}
+
+impl Default for TimelineState {
+    fn default() -> Self {
+        Self { visible: false, zoom: 0.0, pan_offset: 0.0 }
+    }
+}
+
+impl TimelineState {
+    /// Reset zoom/pan so the next render auto-fits the process range.
+    pub fn reset(&mut self) {
+        self.zoom = 0.0;
+        self.pan_offset = 0.0;
+    }
+}
+
 /// All application state owned by the main thread.
 pub struct AppState {
     pub process_tree: ProcessTree,
@@ -76,6 +100,8 @@ pub struct AppState {
     pub flat_visible: Vec<ProcessGuid>,
     /// When true, the next render of the selected node calls scroll_to_me().
     pub scroll_to_selected: bool,
+    /// Timeline panel state.
+    pub timeline: TimelineState,
 }
 
 impl Default for AppState {
@@ -100,6 +126,7 @@ impl Default for AppState {
             tree_event_filter: TreeEventFilter::default(),
             flat_visible: Vec::new(),
             scroll_to_selected: false,
+            timeline: TimelineState::default(),
         }
     }
 }

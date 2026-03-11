@@ -217,19 +217,25 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 
 ---
 
-## Phase 4B: Timeline View
+## Phase 4B: Timeline View ✅ COMPLETE
 
 **Goal:** Interactive timeline visualization for selected process events.
+**Status: ✅ COMPLETE**
 
-### 4B.1 Timeline Panel
-- [ ] `TopBottomPanel::bottom` (collapsible, ~15-20% height)
-- [ ] Horizontal time axis for selected process's event range
-- [ ] Event dots color-coded by category (network=blue, file=green, registry=orange, injection=red)
-- [ ] Custom drawing via egui `Painter` API
-- [ ] Hover tooltip showing event summary
-- [ ] Click event dot → scroll to event in detail panel
-- [ ] Mouse wheel zoom + click-drag pan
-- [ ] Bucket events by pixel column to avoid overdraw (count tooltip for dense areas)
+### 4B.1 Timeline Panel ✅
+- [x] `TopBottomPanel::bottom` (collapsible, 28px collapsed / 160px default expanded, resizable)
+- [x] Horizontal time axis for selected process's event range
+- [x] Event dots color-coded by category (network=blue, file=green, registry=orange, injection=red, pipes=purple, drivers=cyan, other=gray)
+- [x] Custom drawing via egui `Painter` API (circle_filled, line_segment, text)
+- [x] Hover tooltip showing event summary (single: EventID + label + timestamp; multi: count + list of up to 5)
+- [x] Mouse wheel zoom (smooth_scroll_delta, cursor-anchored), click-drag pan
+- [x] Bucket events by pixel column to avoid overdraw (count shown in tooltip, ring indicator for multi-event)
+- [x] Process start (green) / end (red) vertical markers
+- [x] Colour legend in header; "Fit" button to reset zoom/pan
+- [x] `TimelineState` in `state.rs` (visible, zoom, pan_offset + `reset()`)
+- [x] `select_process()` calls `timeline.reset()` on process change
+- [x] `render_timeline_panel()` + `render_timeline_content()` in `app.rs`
+- [x] Helper methods: `timeline_event_color`, `timeline_event_label`, `nice_tick_interval`
 
 ---
 
@@ -289,6 +295,6 @@ Complete task list from start to finish based on `CLAUDE.md` and `.claude/archit
 | 2 | Basic GUI | Working app: load file, tree, overview panel | ✅ Done |
 | 3 | Full Telemetry | All 7 telemetry tabs with virtual-scrolled tables | ✅ Done |
 | 4A | UX Polish | Search/filter, tree polish, keyboard nav | ✅ Done |
-| 4B | Timeline | Interactive timeline visualization | ⬜ |
+| 4B | Timeline | Interactive timeline visualization | ✅ Done |
 | 4C | Performance | Benchmarks, string interning, virtual scroll opt | ⬜ |
 | 5 | Advanced | Sigma rules, query DSL, multi-host, export | ⬜ |

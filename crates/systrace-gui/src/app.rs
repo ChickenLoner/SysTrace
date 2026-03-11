@@ -75,6 +75,8 @@ impl SysTraceApp {
         self.state.tab_pipes.selected_row = None;
         self.state.tab_injection.selected_row = None;
         self.state.tab_drivers.selected_row = None;
+        // Reset timeline zoom/pan for the newly selected process.
+        self.state.timeline.reset();
     }
 
     // -----------------------------------------------------------------------
@@ -370,6 +372,389 @@ impl SysTraceApp {
             self.collect_visible_preorder(ctx, root, &mut out);
         }
         out
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeline helpers
+    // -----------------------------------------------------------------------
+
+    /// Map an event_id to its timeline colour (category-coded).
+    fn timeline_event_color(event_id: u16) -> egui::Color32 {
+        match event_id {
+            3 | 22 => egui::Color32::from_rgb(100, 160, 255),          // network: blue
+            11 | 15 | 23 | 26 | 27 | 28 | 29 => egui::Color32::from_rgb(80, 200, 100), // file: green
+            12 | 13 | 14 => egui::Color32::from_rgb(255, 160, 50),     // registry: orange
+            8 | 10 | 25 => egui::Color32::from_rgb(220, 60, 60),       // injection: red
+            17 | 18 => egui::Color32::from_rgb(180, 100, 220),         // pipes: purple
+            6 | 7 => egui::Color32::from_rgb(80, 200, 200),            // drivers: cyan
+            _ => egui::Color32::from_gray(160),                        // other: gray
+        }
+    }
+
+    /// Category label for an event_id (for tooltips).
+    fn timeline_event_label(event_id: u16) -> &'static str {
+        match event_id {
+            1 => "ProcessCreate", 2 => "FileCreateTime", 3 => "NetworkConnect",
+            4 => "SysmonState", 5 => "ProcessTerminate", 6 => "DriverLoad",
+            7 => "ImageLoad", 8 => "CreateRemoteThread", 9 => "RawAccessRead",
+            10 => "ProcessAccess", 11 => "FileCreate", 12 => "RegistryCreate/Delete",
+            13 => "RegistryValueSet", 14 => "RegistryRename", 15 => "FileStreamHash",
+            16 => "ConfigChange", 17 => "PipeCreated", 18 => "PipeConnected",
+            22 => "DnsQuery", 23 => "FileDelete", 25 => "ProcessTampering",
+            26 => "FileDeleteDetected", 27 => "FileBlockExecutable",
+            28 => "FileBlockShredding", 29 => "FileExecutableDetected",
+            n => { let _ = n; "Unknown" }
+        }
+    }
+
+    /// Pick a "nice" tick interval (in seconds) targeting ~8 ticks in `view_secs`.
+    fn nice_tick_interval(view_secs: f64) -> f64 {
+        let ideal = view_secs / 8.0;
+        let candidates = [
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0,
+            30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0,
+        ];
+        candidates
+            .iter()
+            .copied()
+            .min_by(|a, b| (a - ideal).abs().partial_cmp(&(b - ideal).abs()).unwrap())
+            .unwrap_or(1.0)
+    }
+
+    fn render_timeline_panel(&mut self, ctx: &egui::Context) {
+        let panel_height = if self.state.timeline.visible { 160.0_f32 } else { 28.0 };
+
+        egui::TopBottomPanel::bottom("timeline_panel")
+            .resizable(self.state.timeline.visible)
+            .min_height(panel_height)
+            .max_height(400.0)
+            .default_height(panel_height)
+            .show(ctx, |ui| {
+                // Header row: toggle + legend
+                ui.horizontal(|ui| {
+                    let icon = if self.state.timeline.visible { "▼" } else { "▶" };
+                    if ui.small_button(format!("{icon} Timeline")).clicked() {
+                        self.state.timeline.visible = !self.state.timeline.visible;
+                    }
+                    if self.state.timeline.visible {
+                        ui.separator();
+                        // Colour legend
+                        for (color, label) in [
+                            (egui::Color32::from_rgb(100, 160, 255), "Network"),
+                            (egui::Color32::from_rgb(80, 200, 100), "File"),
+                            (egui::Color32::from_rgb(255, 160, 50), "Registry"),
+                            (egui::Color32::from_rgb(220, 60, 60), "Injection"),
+                            (egui::Color32::from_rgb(180, 100, 220), "Pipes"),
+                            (egui::Color32::from_rgb(80, 200, 200), "Drivers"),
+                            (egui::Color32::from_gray(160), "Other"),
+                        ] {
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 5.0, color);
+                            ui.label(label);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Fit").clicked() {
+                                self.state.timeline.reset();
+                            }
+                        });
+                    }
+                });
+
+                if !self.state.timeline.visible {
+                    return;
+                }
+
+                ui.separator();
+                self.render_timeline_content(ui);
+            });
+    }
+
+    fn render_timeline_content(&mut self, ui: &mut egui::Ui) {
+        let Some(guid) = self.state.selected_process else {
+            ui.centered_and_justified(|ui| {
+                ui.label("Select a process to view its timeline.");
+            });
+            return;
+        };
+
+        // Collect event indices for this process (sorted by time implicitly from insertion order)
+        let indices: Vec<usize> = self
+            .state
+            .event_store
+            .events_for_process(&guid)
+            .to_vec();
+
+        if indices.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.label("No events recorded for this process.");
+            });
+            return;
+        }
+
+        // Determine time range: process start → end (or last event)
+        let t_start = self
+            .state
+            .process_tree
+            .get(&guid)
+            .map(|n| n.start_time)
+            .unwrap_or_else(|| self.state.event_store.events[indices[0]].time_created);
+
+        let t_end = self
+            .state
+            .process_tree
+            .get(&guid)
+            .and_then(|n| n.end_time)
+            .unwrap_or_else(|| {
+                indices
+                    .iter()
+                    .map(|&i| self.state.event_store.events[i].time_created)
+                    .max()
+                    .unwrap_or(t_start)
+            });
+
+        let total_secs = ((t_end - t_start).num_milliseconds() as f64 / 1000.0).max(0.001);
+
+        let available = ui.available_rect_before_wrap();
+        let width = available.width().max(1.0);
+        let height = available.height().max(60.0);
+
+        // Auto-fit: initialise zoom/pan when zoom == 0
+        if self.state.timeline.zoom <= 0.0 {
+            self.state.timeline.zoom = (width as f64 / total_secs).max(0.001);
+            self.state.timeline.pan_offset = 0.0;
+        }
+
+        // Handle mouse-wheel zoom (before allocating the response, using ctx)
+        let scroll_y = ui.ctx().input(|i| {
+            if i.pointer.hover_pos().map(|p| available.contains(p)).unwrap_or(false) {
+                i.smooth_scroll_delta.y
+            } else {
+                0.0
+            }
+        });
+        if scroll_y.abs() > 0.1 {
+            let zoom_factor = (1.0 + scroll_y as f64 * 0.005).clamp(0.1, 10.0);
+            let cursor_x = ui
+                .ctx()
+                .input(|i| i.pointer.hover_pos())
+                .map(|p| p.x - available.left())
+                .unwrap_or(width / 2.0) as f64;
+            let cursor_t = self.state.timeline.pan_offset
+                + cursor_x / self.state.timeline.zoom;
+            self.state.timeline.zoom *= zoom_factor;
+            self.state.timeline.pan_offset =
+                cursor_t - cursor_x / self.state.timeline.zoom;
+        }
+
+        // Clamp pan: don't let the user scroll past the event range
+        let view_secs = width as f64 / self.state.timeline.zoom;
+        self.state.timeline.pan_offset = self
+            .state
+            .timeline
+            .pan_offset
+            .clamp(-view_secs * 0.1, (total_secs + view_secs * 0.1).max(0.0));
+
+        // Allocate drawing area
+        let (response, painter) =
+            ui.allocate_painter(egui::vec2(width, height), egui::Sense::click_and_drag());
+        let rect = response.rect;
+
+        // Handle drag pan
+        if response.dragged() {
+            let delta = response.drag_delta().x as f64;
+            self.state.timeline.pan_offset -= delta / self.state.timeline.zoom;
+        }
+
+        // ── Draw background ──────────────────────────────────────────────────
+        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(18));
+
+        // ── Time axis line ───────────────────────────────────────────────────
+        let axis_y = rect.bottom() - 22.0;
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), axis_y),
+                egui::pos2(rect.right(), axis_y),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+        );
+
+        // ── Time ticks & labels ──────────────────────────────────────────────
+        let view_secs_visible = width as f64 / self.state.timeline.zoom;
+        let tick_interval = Self::nice_tick_interval(view_secs_visible);
+        let first_tick = (self.state.timeline.pan_offset / tick_interval).ceil() * tick_interval;
+        let mut t = first_tick;
+        while t <= self.state.timeline.pan_offset + view_secs_visible {
+            let x = rect.left()
+                + ((t - self.state.timeline.pan_offset) * self.state.timeline.zoom) as f32;
+            if x >= rect.left() && x <= rect.right() {
+                painter.line_segment(
+                    [egui::pos2(x, axis_y), egui::pos2(x, axis_y + 6.0)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+                );
+                let label = if t < 60.0 {
+                    format!("{:.3}s", t)
+                } else {
+                    let mins = (t as u64) / 60;
+                    let secs = t - mins as f64 * 60.0;
+                    format!("{mins}m{secs:.1}s")
+                };
+                painter.text(
+                    egui::pos2(x + 2.0, axis_y + 8.0),
+                    egui::Align2::LEFT_TOP,
+                    label,
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::from_gray(150),
+                );
+            }
+            t += tick_interval;
+        }
+
+        // ── Process start / end markers ──────────────────────────────────────
+        {
+            let start_x = rect.left()
+                + ((0.0_f64 - self.state.timeline.pan_offset) * self.state.timeline.zoom) as f32;
+            if start_x >= rect.left() && start_x <= rect.right() {
+                painter.line_segment(
+                    [egui::pos2(start_x, rect.top()), egui::pos2(start_x, axis_y)],
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 200, 80)),
+                );
+            }
+
+            let end_x = rect.left()
+                + ((total_secs - self.state.timeline.pan_offset) * self.state.timeline.zoom)
+                    as f32;
+            if end_x >= rect.left() && end_x <= rect.right() {
+                painter.line_segment(
+                    [egui::pos2(end_x, rect.top()), egui::pos2(end_x, axis_y)],
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 80, 80)),
+                );
+            }
+        }
+
+        // ── Bucket events by pixel column ────────────────────────────────────
+        // Key: pixel column (i32), value: (first_event_idx, count, blended color)
+        let mut buckets: std::collections::HashMap<i32, (usize, usize, egui::Color32)> =
+            std::collections::HashMap::new();
+
+        for &idx in &indices {
+            let event = &self.state.event_store.events[idx];
+            let t_offset = (event.time_created - t_start).num_milliseconds() as f64 / 1000.0;
+            let x = rect.left()
+                + ((t_offset - self.state.timeline.pan_offset) * self.state.timeline.zoom) as f32;
+            let col = x as i32;
+            if x < rect.left() - 10.0 || x > rect.right() + 10.0 {
+                continue;
+            }
+            let color = Self::timeline_event_color(event.event_id);
+            buckets
+                .entry(col)
+                .and_modify(|(_, count, _)| *count += 1)
+                .or_insert((idx, 1, color));
+        }
+
+        // ── Draw dots ────────────────────────────────────────────────────────
+        let dot_y = axis_y - 12.0;
+        let hover_pos = response.hover_pos();
+
+        // Track which bucket is hovered for tooltip
+        let mut hovered_bucket: Option<(egui::Pos2, usize, usize)> = None; // (pos, first_idx, count)
+
+        for (&col, &(first_idx, count, color)) in &buckets {
+            let x = col as f32 + 0.5;
+            let pos = egui::pos2(x, dot_y);
+            let radius = if count > 1 { 5.5_f32 } else { 4.0 };
+
+            // Outer ring for multi-event buckets
+            if count > 1 {
+                painter.circle_stroke(
+                    pos,
+                    radius + 1.5,
+                    egui::Stroke::new(1.0, color.linear_multiply(0.5)),
+                );
+            }
+            painter.circle_filled(pos, radius, color);
+
+            // Hover detection
+            if let Some(hp) = hover_pos {
+                if (hp.x - x).abs() <= radius + 3.0 && (hp.y - dot_y).abs() <= radius + 3.0 {
+                    hovered_bucket = Some((pos, first_idx, count));
+                    // Highlight ring
+                    painter.circle_stroke(
+                        pos,
+                        radius + 3.0,
+                        egui::Stroke::new(1.5, egui::Color32::WHITE),
+                    );
+                }
+            }
+        }
+
+        // ── Tooltip ──────────────────────────────────────────────────────────
+        if let Some((dot_pos, first_idx, count)) = hovered_bucket {
+            let event = &self.state.event_store.events[first_idx];
+            let t_offset = (event.time_created - t_start).num_milliseconds() as f64 / 1000.0;
+            let ts_str = panels::fmt_time(event.time_created);
+
+            egui::show_tooltip_at(
+                ui.ctx(),
+                ui.layer_id(),
+                egui::Id::new("timeline_tip"),
+                egui::pos2(dot_pos.x + 8.0, dot_pos.y - 12.0),
+                |ui| {
+                    if count > 1 {
+                        ui.label(format!("{count} events at +{t_offset:.3}s"));
+                        // Show up to 5 event types
+                        let visible_indices: Vec<usize> = indices
+                            .iter()
+                            .copied()
+                            .filter(|&i| {
+                                let ev = &self.state.event_store.events[i];
+                                let t =
+                                    (ev.time_created - t_start).num_milliseconds() as f64 / 1000.0;
+                                let x = rect.left()
+                                    + ((t - self.state.timeline.pan_offset)
+                                        * self.state.timeline.zoom)
+                                        as f32;
+                                x as i32 == dot_pos.x as i32
+                            })
+                            .take(5)
+                            .collect();
+                        for i in visible_indices {
+                            let ev = &self.state.event_store.events[i];
+                            ui.label(format!(
+                                "  EventID {}: {}",
+                                ev.event_id,
+                                Self::timeline_event_label(ev.event_id)
+                            ));
+                        }
+                        if count > 5 {
+                            ui.label(format!("  … and {} more", count - 5));
+                        }
+                    } else {
+                        ui.label(format!(
+                            "EventID {}: {}",
+                            event.event_id,
+                            Self::timeline_event_label(event.event_id)
+                        ));
+                        ui.label(format!("Time: {ts_str} (+{t_offset:.3}s)"));
+                        if let Some(image) = &event.image {
+                            ui.label(format!("Image: {image}"));
+                        }
+                    }
+                },
+            );
+        }
+
+        // ── Zoom hint ────────────────────────────────────────────────────────
+        if buckets.is_empty() && !indices.is_empty() {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Scroll to zoom · Drag to pan",
+                egui::FontId::proportional(11.0),
+                egui::Color32::from_gray(100),
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1017,10 +1402,13 @@ impl eframe::App for SysTraceApp {
             self.render_menu(ui, ctx);
         });
 
-        // Status bar
+        // Status bar (registered first so it appears at the very bottom)
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             self.render_status_bar(ui);
         });
+
+        // Timeline panel (stacks above status bar)
+        self.render_timeline_panel(ctx);
 
         // Process tree (left side panel)
         egui::SidePanel::left("process_tree_panel")
