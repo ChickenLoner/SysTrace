@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use systrace_core::{EventStore, ProcessGuid, ProcessTree, Timestamp};
 
 use crate::panels::TabState;
+
+pub use systrace_core::SharedRodeo;
 
 /// Event category filter for the process tree.
 /// When any field is true, only processes with matching events are shown.
@@ -34,6 +37,7 @@ pub enum TelemetryTab {
     Pipes,
     Injection,
     DriversModules,
+    Timeline,
 }
 
 /// Metadata computed once file loading is complete.
@@ -47,6 +51,7 @@ pub struct FileMetadata {
     pub time_range: Option<(Timestamp, Timestamp)>,
     pub computer_names: HashSet<String>,
 }
+
 
 /// All application state owned by the main thread.
 pub struct AppState {
@@ -76,6 +81,32 @@ pub struct AppState {
     pub flat_visible: Vec<ProcessGuid>,
     /// When true, the next render of the selected node calls scroll_to_me().
     pub scroll_to_selected: bool,
+    /// Shared string interner for `SysmonEvent.computer/image/user` fields.
+    pub rodeo: SharedRodeo,
+    /// Active time range filter for telemetry tables (None = no filter).
+    pub time_range_filter: Option<(Timestamp, Timestamp)>,
+    // ── Phase 5 additions ────────────────────────────────────────────────────
+    /// Currently selected host filter (None = show all hosts).
+    pub selected_host: Option<String>,
+    /// Dark mode toggle (true = dark, false = light).
+    pub dark_mode: bool,
+    /// Per-process notes/bookmarks.  Key = ProcessGuid.
+    pub bookmarks: HashMap<ProcessGuid, String>,
+    /// Recently opened file paths (most recent first, max 10).
+    pub recent_files: Vec<PathBuf>,
+    // ── Timeline tab ──────────────────────────────────────────────────────────
+    /// Text filter for the process tree in the Timeline tab.
+    pub timeline_filter: String,
+    /// Processes checked/selected for timeline generation.
+    pub timeline_checked: HashSet<ProcessGuid>,
+    /// Cached sorted event indices (built on "Generate Timeline" click).
+    pub timeline_events: Vec<usize>,
+    /// Whether the timeline has been generated (shows event table vs placeholder).
+    pub timeline_generated: bool,
+    /// Sort/selection state for the timeline event table.
+    pub tab_timeline: TabState,
+    /// Text filter for the timeline event table rows.
+    pub timeline_event_filter: String,
 }
 
 impl Default for AppState {
@@ -100,6 +131,18 @@ impl Default for AppState {
             tree_event_filter: TreeEventFilter::default(),
             flat_visible: Vec::new(),
             scroll_to_selected: false,
+            rodeo: systrace_core::new_rodeo(),
+            time_range_filter: None,
+            selected_host: None,
+            dark_mode: true,
+            bookmarks: HashMap::new(),
+            recent_files: Vec::new(),
+            timeline_filter: String::new(),
+            timeline_checked: HashSet::new(),
+            timeline_events: Vec::new(),
+            timeline_generated: false,
+            tab_timeline: TabState::default(),
+            timeline_event_filter: String::new(),
         }
     }
 }

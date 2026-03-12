@@ -156,13 +156,13 @@ mod tests {
     use crate::event::{EventDetail, SysmonEvent, SysmonEventType};
     use crate::types::parse_guid;
 
-    fn dummy_event(event_id: u16, guid_str: &str) -> SysmonEvent {
+    fn dummy_event(event_id: u16, guid_str: &str, rodeo: &crate::SharedRodeo) -> SysmonEvent {
         SysmonEvent {
             event_id,
             event_type: SysmonEventType::from_event_id(event_id),
             time_created: chrono::DateTime::from_timestamp(0, 0).unwrap(),
             record_number: 0,
-            computer: "test".to_owned(),
+            computer: rodeo.get_or_intern("test"),
             process_guid: Some(parse_guid(guid_str).unwrap()),
             process_id: Some(100),
             image: None,
@@ -178,10 +178,11 @@ mod tests {
 
     #[test]
     fn basic_indexing() {
+        let rodeo = crate::new_rodeo();
         let mut store = EventStore::new();
-        store.insert(dummy_event(1, G1));
-        store.insert(dummy_event(3, G1));
-        store.insert(dummy_event(1, G2));
+        store.insert(dummy_event(1, G1, &rodeo));
+        store.insert(dummy_event(3, G1, &rodeo));
+        store.insert(dummy_event(1, G2, &rodeo));
 
         let guid1 = parse_guid(G1).unwrap();
         let guid2 = parse_guid(G2).unwrap();
@@ -194,10 +195,11 @@ mod tests {
 
     #[test]
     fn events_for_process_and_type() {
+        let rodeo = crate::new_rodeo();
         let mut store = EventStore::new();
-        store.insert(dummy_event(1, G1));
-        store.insert(dummy_event(3, G1));
-        store.insert(dummy_event(3, G1));
+        store.insert(dummy_event(1, G1, &rodeo));
+        store.insert(dummy_event(3, G1, &rodeo));
+        store.insert(dummy_event(3, G1, &rodeo));
 
         let guid1 = parse_guid(G1).unwrap();
         let network = store.events_for_process_and_type(&guid1, 3);

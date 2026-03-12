@@ -37,6 +37,7 @@ pub fn render_registry(
     guid: ProcessGuid,
     tab: &mut TabState,
     filter: &str,
+    time_range: Option<(Timestamp, Timestamp)>,
 ) {
     let indices = event_store.events_for_process_and_types(&guid, &[12, 13, 14]);
     if indices.is_empty() {
@@ -78,6 +79,9 @@ pub fn render_registry(
         let f = filter.to_lowercase();
         rows.retain(|r| r.copy_text().to_lowercase().contains(&f));
     }
+    if let Some((t_from, t_to)) = time_range {
+        rows.retain(|r| r.time >= t_from && r.time <= t_to);
+    }
     if rows.is_empty() {
         render_empty(ui, "No matching events.");
         return;
@@ -100,45 +104,63 @@ pub fn render_registry(
     let mut next_selected = selected;
     let rows_ref = &rows;
 
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .sense(egui::Sense::click())
-        .column(Column::initial(90.0).clip(true))
-        .column(Column::initial(115.0).clip(true))
-        .column(Column::remainder().clip(true))
-        .column(Column::initial(200.0).clip(true))
-        .header(20.0, |mut header| {
-            for (i, h) in headers.iter().enumerate() {
-                header.col(|ui| {
-                    if ui.button(h.as_str()).clicked() {
-                        next_sort = Some(i);
-                    }
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(18.0, rows_ref.len(), |mut row| {
-                let i = row.index();
-                let r = &rows_ref[i];
-                row.set_selected(selected == Some(i));
-                row.col(|ui| { ui.label(fmt_time(r.time)); });
-                row.col(|ui| { ui.label(&r.action); });
-                row.col(|ui| { ui.label(&r.target_object); });
-                row.col(|ui| { ui.label(&r.details); });
-                let resp = row.response();
-                if resp.clicked() {
-                    next_selected = Some(i);
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .column(Column::initial(185.0).clip(true))  // Time
+            .column(Column::initial(130.0).clip(true))  // Action
+            .column(Column::remainder().clip(true).at_least(260.0)) // Key / Target
+            .column(Column::initial(220.0).clip(true))  // Value
+            .header(20.0, |mut header| {
+                for (i, h) in headers.iter().enumerate() {
+                    header.col(|ui| {
+                        if ui.button(h.as_str()).clicked() {
+                            next_sort = Some(i);
+                        }
+                    });
                 }
-                let copy = r.copy_text();
-                resp.context_menu(|ui| {
-                    if ui.button("Copy row").clicked() {
-                        ui.ctx().copy_text(copy.clone());
-                        ui.close_menu();
+            })
+            .body(|body| {
+                body.rows(18.0, rows_ref.len(), |mut row| {
+                    let i = row.index();
+                    let r = &rows_ref[i];
+                    row.set_selected(selected == Some(i));
+                    row.col(|ui| { ui.label(fmt_time(r.time)); });
+                    row.col(|ui| { ui.label(&r.action); });
+                    row.col(|ui| { ui.label(&r.target_object); });
+                    row.col(|ui| { ui.label(&r.details); });
+                    let resp = row.response();
+                    if resp.clicked() {
+                        next_selected = Some(i);
                     }
+                    resp.context_menu(|ui| {
+                        if ui.button("Copy Row").clicked() {
+                            ui.ctx().copy_text(r.copy_text());
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Copy Time").clicked() {
+                            ui.ctx().copy_text(fmt_time(r.time));
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Action").clicked() {
+                            ui.ctx().copy_text(r.action.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Target Object").clicked() {
+                            ui.ctx().copy_text(r.target_object.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Details").clicked() {
+                            ui.ctx().copy_text(r.details.clone());
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
-        });
+    });
 
     if let Some(col) = next_sort {
         tab.sort.toggle(col);

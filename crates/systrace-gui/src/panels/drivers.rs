@@ -39,6 +39,7 @@ pub fn render_drivers(
     guid: ProcessGuid,
     tab: &mut TabState,
     filter: &str,
+    time_range: Option<(Timestamp, Timestamp)>,
 ) {
     let indices = event_store.events_for_process_and_types(&guid, &[6, 7]);
     if indices.is_empty() {
@@ -78,6 +79,9 @@ pub fn render_drivers(
         let f = filter.to_lowercase();
         rows.retain(|r| r.copy_text().to_lowercase().contains(&f));
     }
+    if let Some((t_from, t_to)) = time_range {
+        rows.retain(|r| r.time >= t_from && r.time <= t_to);
+    }
     if rows.is_empty() {
         render_empty(ui, "No matching events.");
         return;
@@ -104,47 +108,65 @@ pub fn render_drivers(
     let mut next_selected = selected;
     let rows_ref = &rows;
 
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .sense(egui::Sense::click())
-        .column(Column::initial(90.0).clip(true))
-        .column(Column::initial(60.0).clip(true))
-        .column(Column::initial(300.0).clip(true))
-        .column(Column::initial(160.0).clip(true))
-        .column(Column::remainder().clip(true))
-        .header(20.0, |mut header| {
-            for (i, h) in headers.iter().enumerate() {
-                header.col(|ui| {
-                    if ui.button(h.as_str()).clicked() {
-                        next_sort = Some(i);
-                    }
-                });
-            }
-        })
-        .body(|body| {
-            body.rows(18.0, rows_ref.len(), |mut row| {
-                let i = row.index();
-                let r = &rows_ref[i];
-                row.set_selected(selected == Some(i));
-                row.col(|ui| { ui.label(fmt_time(r.time)); });
-                row.col(|ui| { ui.label(r.kind); });
-                row.col(|ui| { ui.label(&r.image_loaded); });
-                row.col(|ui| { ui.label(&r.signature); });
-                row.col(|ui| { ui.label(&r.signature_status); });
-                let resp = row.response();
-                if resp.clicked() {
-                    next_selected = Some(i);
+    egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .column(Column::initial(185.0).clip(true))  // Time
+            .column(Column::initial(75.0).clip(true))   // Action
+            .column(Column::initial(320.0).clip(true))  // Image Loaded
+            .column(Column::initial(180.0).clip(true))  // Signature
+            .column(Column::remainder().clip(true).at_least(120.0)) // Status
+            .header(20.0, |mut header| {
+                for (i, h) in headers.iter().enumerate() {
+                    header.col(|ui| {
+                        if ui.button(h.as_str()).clicked() {
+                            next_sort = Some(i);
+                        }
+                    });
                 }
-                let copy = r.copy_text();
-                resp.context_menu(|ui| {
-                    if ui.button("Copy row").clicked() {
-                        ui.ctx().copy_text(copy.clone());
-                        ui.close_menu();
+            })
+            .body(|body| {
+                body.rows(18.0, rows_ref.len(), |mut row| {
+                    let i = row.index();
+                    let r = &rows_ref[i];
+                    row.set_selected(selected == Some(i));
+                    row.col(|ui| { ui.label(fmt_time(r.time)); });
+                    row.col(|ui| { ui.label(r.kind); });
+                    row.col(|ui| { ui.label(&r.image_loaded); });
+                    row.col(|ui| { ui.label(&r.signature); });
+                    row.col(|ui| { ui.label(&r.signature_status); });
+                    let resp = row.response();
+                    if resp.clicked() {
+                        next_selected = Some(i);
                     }
+                    resp.context_menu(|ui| {
+                        if ui.button("Copy Row").clicked() {
+                            ui.ctx().copy_text(r.copy_text());
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Copy Time").clicked() {
+                            ui.ctx().copy_text(fmt_time(r.time));
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Image Loaded").clicked() {
+                            ui.ctx().copy_text(r.image_loaded.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Signature").clicked() {
+                            ui.ctx().copy_text(r.signature.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Status").clicked() {
+                            ui.ctx().copy_text(r.signature_status.clone());
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
-        });
+    });
 
     if let Some(col) = next_sort {
         tab.sort.toggle(col);

@@ -4,6 +4,7 @@ pub mod injection;
 pub mod network;
 pub mod pipes;
 pub mod registry;
+pub mod timeline;
 
 /// Column sort state for a telemetry table.
 #[derive(Debug, Clone)]
@@ -52,7 +53,7 @@ pub struct TabState {
 
 /// Format a timestamp for compact table display (time only).
 pub fn fmt_time(ts: systrace_core::Timestamp) -> String {
-    ts.format("%H:%M:%S%.3f").to_string()
+    ts.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
 }
 
 /// Render a centred placeholder when there are no events for the active tab.
@@ -83,4 +84,34 @@ pub fn make_headers(names: &[&str], sort: &SortState) -> Vec<String> {
         .enumerate()
         .map(|(i, &name)| format!("{}{}", name, sort.indicator(i)))
         .collect()
+}
+
+/// Map a Sysmon event_id to its category colour.
+pub fn event_color(event_id: u16) -> eframe::egui::Color32 {
+    use eframe::egui::Color32;
+    match event_id {
+        3 | 22 => Color32::from_rgb(100, 160, 255),
+        11 | 15 | 23 | 26 | 27 | 28 | 29 => Color32::from_rgb(80, 200, 100),
+        12 | 13 | 14 => Color32::from_rgb(255, 160, 50),
+        8 | 10 | 25 => Color32::from_rgb(220, 60, 60),
+        17 | 18 => Color32::from_rgb(180, 100, 220),
+        6 | 7 => Color32::from_rgb(80, 200, 200),
+        _ => Color32::from_gray(160),
+    }
+}
+
+/// Human-readable label for a Sysmon event_id.
+pub fn event_label(event_id: u16) -> &'static str {
+    match event_id {
+        1 => "ProcessCreate", 2 => "FileCreateTime", 3 => "NetworkConnect",
+        4 => "SysmonState", 5 => "ProcessTerminate", 6 => "DriverLoad",
+        7 => "ImageLoad", 8 => "CreateRemoteThread", 9 => "RawAccessRead",
+        10 => "ProcessAccess", 11 => "FileCreate", 12 => "RegistryCreate/Delete",
+        13 => "RegistryValueSet", 14 => "RegistryRename", 15 => "FileStreamHash",
+        16 => "ConfigChange", 17 => "PipeCreated", 18 => "PipeConnected",
+        22 => "DnsQuery", 23 => "FileDelete", 25 => "ProcessTampering",
+        26 => "FileDeleteDetected", 27 => "FileBlockExecutable",
+        28 => "FileBlockShredding", 29 => "FileExecutableDetected",
+        _ => "Unknown",
+    }
 }

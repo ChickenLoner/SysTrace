@@ -118,7 +118,11 @@ pub fn parse_payload(payload: &str) -> Result<HashMap<String, String>, serde_jso
 }
 
 /// Double any backslash that is NOT already part of a recognised JSON escape
-/// sequence (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`).
+/// sequence (`\"`, `\\`, `\/`, `\uXXXX`).
+///
+/// Note: `\b`, `\f`, `\n`, `\r`, `\t` are valid JSON escapes but EVTXECmd
+/// never intentionally produces them — they are Windows path separators that
+/// were not double-escaped.  We treat them as stray backslashes too.
 fn fix_unescaped_backslashes(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(s.len() + 32);
@@ -131,8 +135,8 @@ fn fix_unescaped_backslashes(s: &str) -> String {
         }
         // We have a backslash — check what follows.
         match bytes.get(i + 1).copied() {
-            Some(b'"') | Some(b'\\') | Some(b'/') | Some(b'b')
-            | Some(b'f') | Some(b'n') | Some(b'r') | Some(b't') => {
+            // Only keep escapes that EVTXECmd truly intends: \", \\, \/
+            Some(b'"') | Some(b'\\') | Some(b'/') => {
                 out.push(b'\\');
                 out.push(bytes[i + 1]);
                 i += 2;
@@ -224,11 +228,15 @@ fn parse_timestamp(s: &str, line: u64, errors: &mut Vec<ParseError>) -> Option<T
 // ---------------------------------------------------------------------------
 
 /// Build a `SysmonEvent` from the raw record + parsed field map.
+///
+/// `computer`, `image`, and `user` are interned into `rodeo` to deduplicate
+/// the thousands of repeated strings across a large log file.
 pub fn extract_event(
     raw: RawEvtxRecord,
     fields: &HashMap<String, String>,
     line: u64,
     errors: &mut Vec<ParseError>,
+    rodeo: &crate::SharedRodeo,
 ) -> Option<SysmonEvent> {
     let event_type = SysmonEventType::from_event_id(raw.event_id);
 
@@ -237,10 +245,12 @@ pub fn extract_event(
     // Common per-process fields (present on most events but not all)
     let process_guid = get_guid(fields, "ProcessGuid", line, errors);
     let process_id = get_u32(fields, "ProcessId");
-    let image = get_owned(fields, "Image");
-    // UserName from top-level, or from payload field "User"
+    // Intern highly-duplicated string fields for memory efficiency.
+    let image = get_owned(fields, "Image").map(|s| rodeo.get_or_intern(s.as_str()));
     let user = raw.user_name.clone()
-        .or_else(|| get_owned(fields, "User"));
+        .or_else(|| get_owned(fields, "User"))
+        .map(|s| rodeo.get_or_intern(s.as_str()));
+    let computer = rodeo.get_or_intern(raw.computer.as_str());
     let rule_name = get_owned(fields, "RuleName");
     let mitre_technique = rule_name.as_deref().and_then(parse_mitre_rule_name);
 
@@ -251,7 +261,7 @@ pub fn extract_event(
         event_type,
         time_created,
         record_number: raw.record_number,
-        computer: raw.computer,
+        computer,
         process_guid,
         process_id,
         image,
@@ -478,11 +488,16 @@ const BATCH_SIZE: usize = 500;
 ///
 /// `bytes_read` is updated atomically so callers can compute progress as
 /// `bytes_read.load() / file_size`.
+///
+/// `rodeo` is the shared string interner — all `computer`, `image`, and `user`
+/// fields in emitted events are interned keys.  The same `SharedRodeo` must be
+/// used to resolve them later.
 pub fn parse_file(
     path: &Path,
     sender: &crossbeam_channel::Sender<Vec<SysmonEvent>>,
     bytes_read: &Arc<AtomicU64>,
     errors_out: &mut Vec<ParseError>,
+    rodeo: &crate::SharedRodeo,
 ) -> Result<()> {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(64 * 1024, file);
@@ -500,11 +515,25 @@ pub fn parse_file(
         }
 
         // Phase 1: deserialize top-level record
-        let raw: RawEvtxRecord = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                errors_out.push(ParseError::TopLevelDeserialize { line: line_num, source: e });
-                continue;
+        // Apply the same lenient backslash fix as parse_payload: EVTXECmd may
+        // write single backslashes (including \r, \t, \n, etc.) directly in
+        // JSON strings.  Try strict parse first; fall back to the fixed line.
+        let raw: RawEvtxRecord = {
+            match serde_json::from_str(&line) {
+                Ok(r) => r,
+                Err(first_err) => {
+                    let fixed = fix_unescaped_backslashes(&line);
+                    match serde_json::from_str::<RawEvtxRecord>(&fixed) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            errors_out.push(ParseError::TopLevelDeserialize {
+                                line: line_num,
+                                source: first_err,
+                            });
+                            continue;
+                        }
+                    }
+                }
             }
         };
 
@@ -519,7 +548,7 @@ pub fn parse_file(
 
         // Phase 3: extract typed SysmonEvent
         let mut local_errors = Vec::new();
-        if let Some(event) = extract_event(raw, &fields, line_num, &mut local_errors) {
+        if let Some(event) = extract_event(raw, &fields, line_num, &mut local_errors, rodeo) {
             batch.push(event);
         }
         errors_out.extend(local_errors);
@@ -552,6 +581,21 @@ mod tests {
         let map = parse_payload(payload).unwrap();
         assert_eq!(map.get("ProcessGuid").unwrap(), "{abc}");
         assert_eq!(map.get("Image").unwrap(), "C:\\foo.exe");
+    }
+
+    #[test]
+    fn parse_payload_unescaped_backslash_paths() {
+        // Simulates EVTXECmd output with single backslashes (not doubled).
+        // \w, \S, \c are invalid JSON escapes; \t and \r are valid JSON escapes
+        // that EVTXECmd never intends as control characters.
+        let payload = "{\"EventData\":{\"Data\":[{\"@Name\":\"CommandLine\",\"#text\":\"rundll32.exe C:\\windows\\System32\\comsvcs.dll, MiniDump 624 C:\\temp\\lsass.dmp full\"}]}}";
+        let map = parse_payload(payload).unwrap();
+        let cmd = map.get("CommandLine").unwrap();
+        assert!(cmd.contains("C:\\windows"), "expected backslash before 'windows', got: {cmd}");
+        assert!(cmd.contains("\\System32"), "expected backslash before 'System32', got: {cmd}");
+        assert!(cmd.contains("\\comsvcs"), "expected backslash before 'comsvcs', got: {cmd}");
+        assert!(cmd.contains("C:\\temp"), "expected backslash before 'temp', got: {cmd}");
+        assert!(cmd.contains("\\lsass"), "expected backslash before 'lsass', got: {cmd}");
     }
 
     #[test]
