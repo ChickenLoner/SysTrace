@@ -1,33 +1,33 @@
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
-use systrace_core::{EventDetail, EventStore, Timestamp};
+use systrace_core::{EventDetail, EventStore, ProcessTree, Timestamp};
 use systrace_core::SharedRodeo;
 
-use super::{cmp_ord, fmt_time, make_headers, render_empty, TabState};
+use super::{cmp_ord, event_color, event_label, fmt_time, make_headers, render_empty, TabState};
 
 // ---------------------------------------------------------------------------
 // Row type
 // ---------------------------------------------------------------------------
 
-struct FindingRow {
-    idx: usize,
+struct TimelineRow {
     time: Timestamp,
+    process_name: String,
+    pid: String,
     event_id: u16,
     event_type: String,
-    image: String,
-    computer: String,
     detail: String,
+    color: egui::Color32,
 }
 
-impl FindingRow {
+impl TimelineRow {
     fn copy_text(&self) -> String {
         format!(
             "{}\t{}\t{}\t{}\t{}\t{}",
             fmt_time(self.time),
+            self.process_name,
+            self.pid,
             self.event_id,
             self.event_type,
-            self.image,
-            self.computer,
             self.detail,
         )
     }
@@ -37,53 +37,73 @@ impl FindingRow {
 // Public render function
 // ---------------------------------------------------------------------------
 
-/// Render the Detection / query results panel.
-pub fn render_detection(
+pub fn render_timeline_table(
     ui: &mut egui::Ui,
     event_store: &EventStore,
-    query_results: &[usize],
+    process_tree: &ProcessTree,
     rodeo: &SharedRodeo,
+    event_indices: &[usize],
     tab: &mut TabState,
+    filter: &str,
 ) {
-    if query_results.is_empty() {
-        render_empty(ui, "No results — use the query bar above to search events.");
+    if event_indices.is_empty() {
+        render_empty(ui, "No events. Select processes and click Generate Timeline.");
         return;
     }
 
-    let mut rows: Vec<FindingRow> = query_results
+    let mut rows: Vec<TimelineRow> = event_indices
         .iter()
         .copied()
         .filter_map(|idx| {
             let ev = event_store.events.get(idx)?;
-            let image = ev
-                .image
-                .map(|s| rodeo.resolve(&s).to_owned())
-                .unwrap_or_default();
-            let computer = rodeo.resolve(&ev.computer).to_owned();
-            let event_type = ev.event_type.display_name().to_owned();
+            let (proc_name, pid_str) = if let Some(guid) = ev.process_guid {
+                if let Some(node) = process_tree.get(&guid) {
+                    (
+                        node.image_name.clone().unwrap_or_else(|| "?".into()),
+                        node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
+                    )
+                } else {
+                    let img = ev.image.map(|s| rodeo.resolve(&s).to_owned()).unwrap_or_else(|| "?".into());
+                    let pid = ev.process_id.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+                    (img, pid)
+                }
+            } else {
+                ("?".into(), "?".into())
+            };
+            let event_type = event_label(ev.event_id).to_owned();
             let detail = detail_summary(&ev.detail);
-            Some(FindingRow {
-                idx,
+            let color = event_color(ev.event_id);
+            Some(TimelineRow {
                 time: ev.time_created,
+                process_name: proc_name,
+                pid: pid_str,
                 event_id: ev.event_id,
                 event_type,
-                image,
-                computer,
                 detail,
+                color,
             })
         })
         .collect();
 
-    // Sorting
+    if !filter.is_empty() {
+        let f = filter.to_lowercase();
+        rows.retain(|r| r.copy_text().to_lowercase().contains(&f));
+    }
+    if rows.is_empty() {
+        render_empty(ui, "No matching events.");
+        return;
+    }
+
+    // Sort
     let col = tab.sort.column;
     let asc = tab.sort.ascending;
     rows.sort_by(|a, b| {
         let o = match col {
             0 => a.time.cmp(&b.time),
-            1 => a.event_id.cmp(&b.event_id),
-            2 => a.event_type.cmp(&b.event_type),
-            3 => a.image.cmp(&b.image),
-            4 => a.computer.cmp(&b.computer),
+            1 => a.process_name.cmp(&b.process_name),
+            2 => a.pid.cmp(&b.pid),
+            3 => a.event_id.cmp(&b.event_id),
+            4 => a.event_type.cmp(&b.event_type),
             5 => a.detail.cmp(&b.detail),
             _ => std::cmp::Ordering::Equal,
         };
@@ -91,48 +111,55 @@ pub fn render_detection(
     });
 
     let headers = make_headers(
-        &["Time", "EventID", "Type", "Image", "Computer", "Details"],
+        &["Time", "Process", "PID", "EventID", "Type", "Details"],
         &tab.sort,
     );
 
-    let row_height = 18.0_f32;
+    let mut next_sort: Option<usize> = None;
+    let mut next_selected = tab.selected_row;
+    let selected = tab.selected_row;
+    let rows_ref = &rows;
+
     egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
+            .sense(egui::Sense::click())
             .column(Column::initial(185.0).clip(true))  // Time
-            .column(Column::initial(65.0).clip(true))   // EventID
-            .column(Column::initial(175.0).clip(true))  // Type
-            .column(Column::initial(220.0).clip(true))  // Image
-            .column(Column::initial(140.0).clip(true))  // Computer
-            .column(Column::remainder().clip(true).at_least(180.0)) // Details
-            .header(row_height, |mut header| {
+            .column(Column::initial(140.0).clip(true))   // Process
+            .column(Column::initial(60.0).clip(true))    // PID
+            .column(Column::initial(65.0).clip(true))    // EventID
+            .column(Column::initial(150.0).clip(true))   // Type
+            .column(Column::remainder().clip(true).at_least(200.0)) // Details
+            .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
-                        if ui.button(h).clicked() {
-                            tab.sort.toggle(i);
+                        if ui.button(h.as_str()).clicked() {
+                            next_sort = Some(i);
                         }
                     });
                 }
             })
             .body(|body| {
-                body.rows(row_height, rows.len(), |mut row| {
-                    let ri = row.index();
-                    let r = &rows[ri];
-                    let is_selected = tab.selected_row == Some(ri);
-                    row.set_selected(is_selected);
-
+                body.rows(18.0, rows_ref.len(), |mut row| {
+                    let i = row.index();
+                    let r = &rows_ref[i];
+                    row.set_selected(selected == Some(i));
                     row.col(|ui| { ui.label(fmt_time(r.time)); });
-                    row.col(|ui| { ui.label(r.event_id.to_string()); });
-                    row.col(|ui| { ui.label(&r.event_type); });
-                    row.col(|ui| { ui.label(&r.image); });
-                    row.col(|ui| { ui.label(&r.computer); });
+                    row.col(|ui| { ui.label(&r.process_name); });
+                    row.col(|ui| { ui.label(&r.pid); });
+                    row.col(|ui| {
+                        ui.colored_label(r.color, r.event_id.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.colored_label(r.color, &r.event_type);
+                    });
                     row.col(|ui| { ui.label(&r.detail); });
-
-                    if row.response().clicked() {
-                        tab.selected_row = Some(ri);
+                    let resp = row.response();
+                    if resp.clicked() {
+                        next_selected = Some(i);
                     }
-                    row.response().context_menu(|ui| {
+                    resp.context_menu(|ui| {
                         if ui.button("Copy Row").clicked() {
                             ui.ctx().copy_text(r.copy_text());
                             ui.close_menu();
@@ -142,12 +169,8 @@ pub fn render_detection(
                             ui.ctx().copy_text(fmt_time(r.time));
                             ui.close_menu();
                         }
-                        if ui.button("Copy Image").clicked() {
-                            ui.ctx().copy_text(r.image.clone());
-                            ui.close_menu();
-                        }
-                        if ui.button("Copy Computer").clicked() {
-                            ui.ctx().copy_text(r.computer.clone());
+                        if ui.button("Copy Process").clicked() {
+                            ui.ctx().copy_text(r.process_name.clone());
                             ui.close_menu();
                         }
                         if ui.button("Copy Details").clicked() {
@@ -158,6 +181,11 @@ pub fn render_detection(
                 });
             });
     });
+
+    if let Some(c) = next_sort {
+        tab.sort.toggle(c);
+    }
+    tab.selected_row = next_selected;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +220,7 @@ fn detail_summary(detail: &EventDetail) -> String {
             if results.is_empty() {
                 name.to_owned()
             } else {
-                format!("{name} → {results}")
+                format!("{name} -> {results}")
             }
         }
         EventDetail::FileCreate { target_filename, .. } => {
@@ -215,12 +243,12 @@ fn detail_summary(detail: &EventDetail) -> String {
         EventDetail::CreateRemoteThread { target_image, start_address, .. } => {
             let target = target_image.as_deref().unwrap_or("?");
             let addr = start_address.as_deref().unwrap_or("?");
-            format!("→ {target} @ {addr}")
+            format!("-> {target} @ {addr}")
         }
         EventDetail::ProcessAccess { target_image, granted_access, .. } => {
             let target = target_image.as_deref().unwrap_or("?");
             let access = granted_access.as_deref().unwrap_or("?");
-            format!("→ {target} access={access}")
+            format!("-> {target} access={access}")
         }
         EventDetail::FileDeleteEvent { target_filename, .. } => {
             target_filename.as_deref().unwrap_or("-").to_owned()
