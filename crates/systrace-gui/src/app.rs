@@ -551,153 +551,207 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
     // Event colour / label helpers (shared by hunt timeline popup)
     // -----------------------------------------------------------------------
-
-    /// Map an event_id to its category colour.
-    fn event_color(event_id: u16) -> egui::Color32 {
-        match event_id {
-            3 | 22 => egui::Color32::from_rgb(100, 160, 255),
-            11 | 15 | 23 | 26 | 27 | 28 | 29 => egui::Color32::from_rgb(80, 200, 100),
-            12 | 13 | 14 => egui::Color32::from_rgb(255, 160, 50),
-            8 | 10 | 25 => egui::Color32::from_rgb(220, 60, 60),
-            17 | 18 => egui::Color32::from_rgb(180, 100, 220),
-            6 | 7 => egui::Color32::from_rgb(80, 200, 200),
-            _ => egui::Color32::from_gray(160),
-        }
-    }
-
-    /// Human-readable label for an event_id.
-    fn event_label(event_id: u16) -> &'static str {
-        match event_id {
-            1 => "ProcessCreate", 2 => "FileCreateTime", 3 => "NetworkConnect",
-            4 => "SysmonState", 5 => "ProcessTerminate", 6 => "DriverLoad",
-            7 => "ImageLoad", 8 => "CreateRemoteThread", 9 => "RawAccessRead",
-            10 => "ProcessAccess", 11 => "FileCreate", 12 => "RegistryCreate/Delete",
-            13 => "RegistryValueSet", 14 => "RegistryRename", 15 => "FileStreamHash",
-            16 => "ConfigChange", 17 => "PipeCreated", 18 => "PipeConnected",
-            22 => "DnsQuery", 23 => "FileDelete", 25 => "ProcessTampering",
-            26 => "FileDeleteDetected", 27 => "FileBlockExecutable",
-            28 => "FileBlockShredding", 29 => "FileExecutableDetected",
-            n => { let _ = n; "Unknown" }
-        }
-    }
-
-    /// Nice tick interval in seconds targeting ~8 ticks in `view_secs`.
-    fn nice_tick_interval(view_secs: f64) -> f64 {
-        let ideal = view_secs / 8.0;
-        let candidates = [
-            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0,
-            30.0, 60.0, 300.0, 600.0, 1800.0, 3600.0,
-        ];
-        candidates
-            .iter()
-            .copied()
-            .min_by(|a, b| (a - ideal).abs().partial_cmp(&(b - ideal).abs()).unwrap())
-            .unwrap_or(1.0)
-    }
-
-    // -----------------------------------------------------------------------
-    // Hunt tab
+    // Timeline tab
     // -----------------------------------------------------------------------
 
-    fn render_hunt_tab(&mut self, ui: &mut Ui) {
+    fn render_timeline_tab(&mut self, ui: &mut Ui) {
         if self.state.event_store.len() == 0 {
-            panels::render_empty(ui, "No data loaded — open a file first.");
+            panels::render_empty(ui, "No data loaded \u{2014} open a file first.");
             return;
         }
 
-        // ── Filter bar ───────────────────────────────────────────────────────
+        let available = ui.available_size();
+        let tree_width = (available.x * 0.35).max(250.0).min(450.0);
+
         ui.horizontal(|ui| {
-            ui.label("Filter:");
-            egui::TextEdit::singleline(&mut self.state.hunt_filter)
-                .hint_text("image name, user, command line, PID…")
-                .desired_width(ui.available_width() - 200.0)
-                .show(ui);
-            if !self.state.hunt_filter.is_empty() && ui.small_button("✕").clicked() {
-                self.state.hunt_filter.clear();
-            }
-            ui.separator();
-            if ui.small_button("Select All").clicked() {
-                let filter_lc = self.state.hunt_filter.to_lowercase();
-                let guids: Vec<_> = self.state.process_tree.nodes.keys().copied()
-                    .filter(|g| Self::hunt_node_matches(&self.state, g, &filter_lc))
-                    .collect();
-                self.state.hunt_checked.extend(guids);
-            }
-            if ui.small_button("Deselect All").clicked() {
-                self.state.hunt_checked.clear();
-            }
-        });
-
-        let checked_count = self.state.hunt_checked.len();
-        ui.horizontal(|ui| {
-            let btn = egui::Button::new(
-                egui::RichText::new(format!("Generate Timeline ({checked_count} selected)"))
-                    .color(if checked_count > 0 {
-                        egui::Color32::from_rgb(80, 200, 100)
-                    } else {
-                        egui::Color32::GRAY
-                    })
-            );
-            if ui.add_enabled(checked_count > 0, btn).clicked() {
-                self.state.hunt_popup_open = true;
-                self.state.hunt_zoom = 0.0; // trigger auto-fit
-                self.state.hunt_pan = 0.0;
-            }
-        });
-
-        ui.separator();
-
-        // ── Process list with checkboxes ────────────────────────────────────
-        let filter_lc = self.state.hunt_filter.to_lowercase();
-
-        // Collect matching processes in pre-order (roots → children)
-        let mut matching: Vec<ProcessGuid> = Vec::new();
-        let roots: Vec<_> = self.state.process_tree.roots().to_vec();
-        for root in roots {
-            Self::hunt_collect_preorder(&self.state, root, &filter_lc, &mut matching);
-        }
-
-        if matching.is_empty() {
-            ui.centered_and_justified(|ui| {
-                if filter_lc.is_empty() {
-                    ui.label("No processes in the tree.");
-                } else {
-                    ui.label(format!("No processes match \"{}\".", self.state.hunt_filter));
-                }
-            });
-            return;
-        }
-
-        ui.label(format!("{} processes match", matching.len()));
-        ui.separator();
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                for guid in matching {
-                    let node = match self.state.process_tree.get(&guid) {
-                        Some(n) => n,
-                        None => continue,
-                    };
-                    let image_name = node.image_name.as_deref().unwrap_or("?");
-                    let pid_str = node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_owned());
-                    let user_str = node.user.as_deref().unwrap_or("-");
-                    let cmd = node.command_line.as_deref().unwrap_or("-");
-                    let label_str = format!("{image_name} ({pid_str})  |  {user_str}  |  {cmd}");
-
-                    let mut checked = self.state.hunt_checked.contains(&guid);
-                    if ui.checkbox(&mut checked, &label_str).changed() {
-                        if checked {
-                            self.state.hunt_checked.insert(guid);
-                        } else {
-                            self.state.hunt_checked.remove(&guid);
+            // ── Left: process tree with checkboxes ──────────────────────────
+            ui.allocate_ui(egui::vec2(tree_width, available.y), |ui| {
+                ui.vertical(|ui| {
+                    // Filter bar
+                    ui.horizontal(|ui| {
+                        ui.label("Filter:");
+                        egui::TextEdit::singleline(&mut self.state.timeline_filter)
+                            .hint_text("image, user, cmd, PID\u{2026}")
+                            .desired_width(ui.available_width() - 60.0)
+                            .show(ui);
+                        if !self.state.timeline_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
+                            self.state.timeline_filter.clear();
                         }
+                    });
+
+                    // Select All / Deselect All
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Select All").clicked() {
+                            let filter_lc = self.state.timeline_filter.to_lowercase();
+                            let guids: Vec<_> = self.state.process_tree.nodes.keys().copied()
+                                .filter(|g| Self::timeline_node_matches(&self.state, g, &filter_lc))
+                                .collect();
+                            self.state.timeline_checked.extend(guids);
+                        }
+                        if ui.small_button("Deselect All").clicked() {
+                            self.state.timeline_checked.clear();
+                            self.state.timeline_generated = false;
+                            self.state.timeline_events.clear();
+                        }
+                    });
+
+                    // Generate Timeline button
+                    let checked_count = self.state.timeline_checked.len();
+                    ui.horizontal(|ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new(format!("Generate Timeline ({checked_count} selected)"))
+                                .color(if checked_count > 0 {
+                                    egui::Color32::from_rgb(80, 200, 100)
+                                } else {
+                                    egui::Color32::GRAY
+                                })
+                        );
+                        if ui.add_enabled(checked_count > 0, btn).clicked() {
+                            let mut indices: Vec<usize> = Vec::new();
+                            for &guid in &self.state.timeline_checked {
+                                indices.extend(self.state.event_store.events_for_process(&guid));
+                            }
+                            indices.sort_by_key(|&i| self.state.event_store.events[i].time_created);
+                            indices.dedup();
+                            self.state.timeline_events = indices;
+                            self.state.timeline_generated = true;
+                            self.state.tab_timeline.selected_row = None;
+                        }
+                    });
+
+                    ui.separator();
+
+                    // Process tree with checkboxes
+                    let filter_lc = self.state.timeline_filter.to_lowercase();
+                    let roots: Vec<_> = self.state.process_tree.roots().to_vec();
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            for root in roots {
+                                self.render_timeline_tree_node(ui, root, &filter_lc);
+                            }
+                        });
+                });
+            });
+
+            ui.separator();
+
+            // ── Right: event table ──────────────────────────────────────────
+            ui.allocate_ui(ui.available_size(), |ui| {
+                if !self.state.timeline_generated {
+                    panels::render_empty(ui, "Select processes and click Generate Timeline.");
+                    return;
+                }
+
+                // Event filter bar
+                ui.horizontal(|ui| {
+                    ui.label("Filter events:");
+                    egui::TextEdit::singleline(&mut self.state.timeline_event_filter)
+                        .hint_text("Filter rows\u{2026}")
+                        .desired_width(ui.available_width() - 40.0)
+                        .show(ui);
+                    if !self.state.timeline_event_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
+                        self.state.timeline_event_filter.clear();
+                    }
+                });
+                ui.separator();
+
+                let events = self.state.timeline_events.clone();
+                let filter = self.state.timeline_event_filter.clone();
+                panels::timeline::render_timeline_table(
+                    ui,
+                    &self.state.event_store,
+                    &self.state.process_tree,
+                    &self.state.rodeo,
+                    &events,
+                    &mut self.state.tab_timeline,
+                    &filter,
+                );
+            });
+        });
+    }
+
+    fn render_timeline_tree_node(&mut self, ui: &mut Ui, guid: ProcessGuid, filter_lc: &str) {
+        let node = match self.state.process_tree.get(&guid) {
+            Some(n) => n,
+            None => return,
+        };
+
+        // Snapshot fields
+        let image_name = node.image_name.clone().unwrap_or_else(|| "?".to_owned());
+        let pid_str = node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_owned());
+        let is_synthetic = node.is_synthetic;
+        let is_terminated = node.end_time.is_some();
+        let user_str = node.user.clone().unwrap_or_else(|| "-".to_owned());
+        let children: Vec<_> = node.children.clone();
+
+        // Text filter — check if this subtree matches
+        if !filter_lc.is_empty() && !self.timeline_subtree_matches(guid, filter_lc) {
+            return;
+        }
+
+        // Color coding
+        let is_injection_target = !self.state.event_store.events_targeting_process(&guid).is_empty();
+        let is_system = user_str.to_uppercase().contains("SYSTEM");
+        let text_color = if is_synthetic {
+            egui::Color32::DARK_GRAY
+        } else if is_injection_target {
+            egui::Color32::from_rgb(220, 60, 60)
+        } else if is_system {
+            egui::Color32::from_rgb(80, 180, 80)
+        } else if is_terminated {
+            egui::Color32::from_rgb(180, 180, 100)
+        } else {
+            ui.visuals().text_color()
+        };
+
+        let label = if is_synthetic {
+            format!("{image_name} ({pid_str}) [synthetic]")
+        } else {
+            format!("{image_name} ({pid_str})")
+        };
+
+        let mut checked = self.state.timeline_checked.contains(&guid);
+
+        if children.is_empty() {
+            // Leaf node
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut checked, "").changed() {
+                    if checked {
+                        self.state.timeline_checked.insert(guid);
+                    } else {
+                        self.state.timeline_checked.remove(&guid);
                     }
                 }
+                ui.label(egui::RichText::new(&label).color(text_color));
             });
+        } else {
+            // Parent node with collapsible children
+            let id = egui::Id::new(("timeline_node", guid));
+            let cs = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(), id, false,
+            );
+
+            cs.show_header(ui, |ui| {
+                if ui.checkbox(&mut checked, "").changed() {
+                    if checked {
+                        self.state.timeline_checked.insert(guid);
+                    } else {
+                        self.state.timeline_checked.remove(&guid);
+                    }
+                }
+                ui.label(egui::RichText::new(&label).color(text_color));
+            })
+            .body(|ui| {
+                for child in children {
+                    self.render_timeline_tree_node(ui, child, filter_lc);
+                }
+            });
+        }
     }
 
-    fn hunt_node_matches(state: &crate::state::AppState, guid: &ProcessGuid, filter_lc: &str) -> bool {
+    fn timeline_node_matches(state: &crate::state::AppState, guid: &ProcessGuid, filter_lc: &str) -> bool {
         if filter_lc.is_empty() {
             return true;
         }
@@ -712,305 +766,20 @@ impl SysTraceApp {
             || pid_str.contains(filter_lc)
     }
 
-    fn hunt_collect_preorder(
-        state: &crate::state::AppState,
-        guid: ProcessGuid,
-        filter_lc: &str,
-        out: &mut Vec<ProcessGuid>,
-    ) {
-        let Some(node) = state.process_tree.get(&guid) else { return; };
-        if Self::hunt_node_matches(state, &guid, filter_lc) {
-            out.push(guid);
+    fn timeline_subtree_matches(&self, guid: ProcessGuid, filter_lc: &str) -> bool {
+        if Self::timeline_node_matches(&self.state, &guid, filter_lc) {
+            return true;
         }
-        let children = node.children.clone();
-        for child in children {
-            Self::hunt_collect_preorder(state, child, filter_lc, out);
+        if let Some(node) = self.state.process_tree.get(&guid) {
+            for &child in &node.children {
+                if self.timeline_subtree_matches(child, filter_lc) {
+                    return true;
+                }
+            }
         }
+        false
     }
 
-    fn render_hunt_timeline_popup(&mut self, ctx: &egui::Context) {
-        if !self.state.hunt_popup_open {
-            return;
-        }
-
-        let guids: Vec<ProcessGuid> = self.state.hunt_checked.iter().copied().collect();
-        if guids.is_empty() {
-            self.state.hunt_popup_open = false;
-            return;
-        }
-
-        let mut open = self.state.hunt_popup_open;
-        egui::Window::new("Hunt Timeline")
-            .open(&mut open)
-            .resizable(true)
-            .default_size([900.0, 400.0])
-            .min_size([400.0, 200.0])
-            .show(ctx, |ui| {
-                // ── Determine global time range ───────────────────────────
-                let mut t_start_opt: Option<systrace_core::Timestamp> = None;
-                let mut t_end_opt: Option<systrace_core::Timestamp> = None;
-                for &guid in &guids {
-                    if let Some(node) = self.state.process_tree.get(&guid) {
-                        let ts = node.start_time;
-                        t_start_opt = Some(match t_start_opt {
-                            Some(t) => t.min(ts),
-                            None => ts,
-                        });
-                        if let Some(te) = node.end_time {
-                            t_end_opt = Some(match t_end_opt {
-                                Some(t) => t.max(te),
-                                None => te,
-                            });
-                        }
-                    }
-                    for &idx in self.state.event_store.events_for_process(&guid) {
-                        let ev_t = self.state.event_store.events[idx].time_created;
-                        t_start_opt = Some(match t_start_opt {
-                            Some(t) => t.min(ev_t),
-                            None => ev_t,
-                        });
-                        t_end_opt = Some(match t_end_opt {
-                            Some(t) => t.max(ev_t),
-                            None => ev_t,
-                        });
-                    }
-                }
-                let (Some(t_start), Some(t_end)) = (t_start_opt, t_end_opt) else {
-                    ui.label("No event data for selected processes.");
-                    return;
-                };
-                let total_secs = ((t_end - t_start).num_milliseconds() as f64 / 1000.0).max(0.001);
-
-                // ── Controls ─────────────────────────────────────────────
-                ui.horizontal(|ui| {
-                    if ui.small_button("Fit").clicked() {
-                        self.state.hunt_zoom = 0.0;
-                        self.state.hunt_pan = 0.0;
-                    }
-                    ui.separator();
-                    // Colour legend
-                    for (color, label) in [
-                        (egui::Color32::from_rgb(100, 160, 255), "Network"),
-                        (egui::Color32::from_rgb(80, 200, 100), "File"),
-                        (egui::Color32::from_rgb(255, 160, 50), "Registry"),
-                        (egui::Color32::from_rgb(220, 60, 60), "Injection"),
-                        (egui::Color32::from_rgb(180, 100, 220), "Pipes"),
-                        (egui::Color32::from_rgb(80, 200, 200), "Drivers"),
-                        (egui::Color32::from_gray(160), "Other"),
-                    ] {
-                        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                        ui.painter().circle_filled(rect.center(), 5.0, color);
-                        ui.label(label);
-                    }
-                });
-                ui.separator();
-
-                // ── Scroll area for swim lanes + time axis ────────────────
-                let lane_h = 30.0_f32;
-                let axis_h = 24.0_f32;
-                let label_w = 180.0_f32;
-                let n_lanes = guids.len();
-                let content_h = lane_h * n_lanes as f32 + axis_h;
-                let available_w = ui.available_width().max(200.0);
-                let draw_w = available_w - label_w;
-
-                // Auto-fit zoom
-                if self.state.hunt_zoom <= 0.0 {
-                    self.state.hunt_zoom = (draw_w as f64 / total_secs).max(0.001);
-                    self.state.hunt_pan = 0.0;
-                }
-
-                let scroll_area_rect = ui.available_rect_before_wrap();
-                // Mouse wheel zoom for the drawing area
-                let scroll_y = ui.ctx().input(|i| {
-                    if i.pointer.hover_pos().map(|p| scroll_area_rect.contains(p)).unwrap_or(false) {
-                        i.smooth_scroll_delta.y
-                    } else {
-                        0.0
-                    }
-                });
-                if scroll_y.abs() > 0.1 {
-                    let zoom_factor = (1.0 + scroll_y as f64 * 0.005).clamp(0.1, 10.0);
-                    let cursor_x = ui.ctx().input(|i| i.pointer.hover_pos())
-                        .map(|p| (p.x - scroll_area_rect.left() - label_w).max(0.0))
-                        .unwrap_or(draw_w / 2.0) as f64;
-                    let cursor_t = self.state.hunt_pan + cursor_x / self.state.hunt_zoom;
-                    self.state.hunt_zoom *= zoom_factor;
-                    self.state.hunt_pan = cursor_t - cursor_x / self.state.hunt_zoom;
-                }
-                // Clamp pan
-                let view_secs = draw_w as f64 / self.state.hunt_zoom;
-                self.state.hunt_pan = self.state.hunt_pan
-                    .clamp(-view_secs * 0.1, (total_secs + view_secs * 0.1).max(0.0));
-
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        let (response, painter) = ui.allocate_painter(
-                            egui::vec2(available_w, content_h),
-                            egui::Sense::drag(),
-                        );
-                        let rect = response.rect;
-
-                        if response.dragged() {
-                            let delta = response.drag_delta().x as f64;
-                            self.state.hunt_pan -= delta / self.state.hunt_zoom;
-                        }
-
-                        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(18));
-
-                        // ── Draw each swim lane ───────────────────────────
-                        let hover_pos = response.hover_pos();
-                        let mut tooltip_info: Option<(egui::Pos2, u16, systrace_core::Timestamp, String)> = None;
-
-                        for (lane_idx, &guid) in guids.iter().enumerate() {
-                            let lane_y = rect.top() + lane_idx as f32 * lane_h;
-                            let lane_rect = egui::Rect::from_min_size(
-                                egui::pos2(rect.left(), lane_y),
-                                egui::vec2(available_w, lane_h),
-                            );
-
-                            // Alternating background
-                            if lane_idx % 2 == 1 {
-                                painter.rect_filled(lane_rect, 0.0, egui::Color32::from_gray(24));
-                            }
-
-                            // Label (image name + pid)
-                            let label_str = if let Some(node) = self.state.process_tree.get(&guid) {
-                                let name = node.image_name.as_deref().unwrap_or("?");
-                                let pid = node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_owned());
-                                format!("{name} ({pid})")
-                            } else {
-                                "?".to_owned()
-                            };
-                            painter.text(
-                                egui::pos2(rect.left() + 4.0, lane_y + lane_h / 2.0),
-                                egui::Align2::LEFT_CENTER,
-                                &label_str,
-                                egui::FontId::proportional(11.0),
-                                egui::Color32::from_gray(200),
-                            );
-
-                            // Separator line below lane
-                            painter.line_segment(
-                                [
-                                    egui::pos2(rect.left(), lane_y + lane_h - 1.0),
-                                    egui::pos2(rect.right(), lane_y + lane_h - 1.0),
-                                ],
-                                egui::Stroke::new(0.5, egui::Color32::from_gray(40)),
-                            );
-
-                            let dot_y = lane_y + lane_h / 2.0;
-                            let draw_left = rect.left() + label_w;
-
-                            // Bucket events for this lane
-                            let mut buckets: std::collections::HashMap<i32, (u16, usize)> =
-                                std::collections::HashMap::new();
-                            for &idx in self.state.event_store.events_for_process(&guid) {
-                                let ev = &self.state.event_store.events[idx];
-                                let t_off = (ev.time_created - t_start).num_milliseconds() as f64 / 1000.0;
-                                let x = draw_left + ((t_off - self.state.hunt_pan) * self.state.hunt_zoom) as f32;
-                                if x < draw_left - 10.0 || x > rect.right() + 10.0 { continue; }
-                                let col = x as i32;
-                                buckets.entry(col)
-                                    .and_modify(|(_, cnt)| *cnt += 1)
-                                    .or_insert((ev.event_id, 1));
-                            }
-
-                            for (&col, &(event_id, count)) in &buckets {
-                                let x = col as f32 + 0.5;
-                                let pos = egui::pos2(x, dot_y);
-                                let radius = if count > 1 { 5.5_f32 } else { 3.5 };
-                                let color = Self::event_color(event_id);
-                                if count > 1 {
-                                    painter.circle_stroke(
-                                        pos, radius + 1.5,
-                                        egui::Stroke::new(1.0, color.linear_multiply(0.5)),
-                                    );
-                                }
-                                painter.circle_filled(pos, radius, color);
-
-                                if let Some(hp) = hover_pos {
-                                    if (hp.x - x).abs() <= radius + 3.0 && (hp.y - dot_y).abs() <= radius + 3.0 {
-                                        painter.circle_stroke(
-                                            pos, radius + 3.0,
-                                            egui::Stroke::new(1.5, egui::Color32::WHITE),
-                                        );
-                                        // Collect first event time for this bucket for tooltip
-                                        if let Some(&idx) = self.state.event_store
-                                            .events_for_process(&guid)
-                                            .iter()
-                                            .find(|&&i| {
-                                                let ev = &self.state.event_store.events[i];
-                                                let t_off = (ev.time_created - t_start).num_milliseconds() as f64 / 1000.0;
-                                                let ex = draw_left + ((t_off - self.state.hunt_pan) * self.state.hunt_zoom) as f32;
-                                                ex as i32 == col
-                                            })
-                                        {
-                                            let ev = &self.state.event_store.events[idx];
-                                            tooltip_info = Some((pos, event_id, ev.time_created, label_str.clone()));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // ── Time axis at bottom ───────────────────────────
-                        let axis_y = rect.top() + n_lanes as f32 * lane_h;
-                        let draw_left = rect.left() + label_w;
-
-                        painter.line_segment(
-                            [egui::pos2(draw_left, axis_y), egui::pos2(rect.right(), axis_y)],
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
-                        );
-
-                        let tick_interval = Self::nice_tick_interval(view_secs);
-                        let first_tick = (self.state.hunt_pan / tick_interval).ceil() * tick_interval;
-                        let mut t = first_tick;
-                        while t <= self.state.hunt_pan + view_secs {
-                            let x = draw_left + ((t - self.state.hunt_pan) * self.state.hunt_zoom) as f32;
-                            if x >= draw_left && x <= rect.right() {
-                                painter.line_segment(
-                                    [egui::pos2(x, axis_y), egui::pos2(x, axis_y + 5.0)],
-                                    egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
-                                );
-                                let label = if t < 60.0 {
-                                    format!("{:.3}s", t)
-                                } else {
-                                    let mins = (t as u64) / 60;
-                                    let secs = t - mins as f64 * 60.0;
-                                    format!("{mins}m{secs:.1}s")
-                                };
-                                painter.text(
-                                    egui::pos2(x + 2.0, axis_y + 6.0),
-                                    egui::Align2::LEFT_TOP,
-                                    label,
-                                    egui::FontId::proportional(10.0),
-                                    egui::Color32::from_gray(150),
-                                );
-                            }
-                            t += tick_interval;
-                        }
-
-                        // ── Tooltip ───────────────────────────────────────
-                        if let Some((dot_pos, event_id, ev_time, proc_label)) = tooltip_info {
-                            let ts_str = panels::fmt_time(ev_time);
-                            egui::show_tooltip_at(
-                                ui.ctx(),
-                                ui.layer_id(),
-                                egui::Id::new("hunt_timeline_tip"),
-                                egui::pos2(dot_pos.x + 8.0, dot_pos.y - 12.0),
-                                |ui| {
-                                    ui.label(&proc_label);
-                                    ui.label(format!("EventID {}: {}", event_id, Self::event_label(event_id)));
-                                    ui.label(format!("Time: {ts_str}"));
-                                },
-                            );
-                        }
-                    });
-            });
-        self.state.hunt_popup_open = open;
-    }
 
     // -----------------------------------------------------------------------
     // Rendering
@@ -1454,7 +1223,7 @@ impl SysTraceApp {
             TelemetryTab::Pipes,
             TelemetryTab::Injection,
             TelemetryTab::DriversModules,
-            TelemetryTab::Detection,
+            TelemetryTab::Timeline,
         ];
         let (tab_forward, tab_backward) = ui.ctx().input(|i| {
             (
@@ -1483,7 +1252,7 @@ impl SysTraceApp {
                 (TelemetryTab::Pipes, "Pipes"),
                 (TelemetryTab::Injection, "Injection"),
                 (TelemetryTab::DriversModules, "Modules"),
-                (TelemetryTab::Detection, "🔍 Hunt"),
+                (TelemetryTab::Timeline, "Timeline"),
             ] {
                 if ui
                     .selectable_label(self.state.active_tab == tab, label)
@@ -1496,7 +1265,7 @@ impl SysTraceApp {
 
         // Global telemetry filter bar (shown for non-Overview, non-Hunt tabs)
         if self.state.active_tab != TelemetryTab::Overview
-            && self.state.active_tab != TelemetryTab::Detection
+            && self.state.active_tab != TelemetryTab::Timeline
         {
             ui.horizontal(|ui| {
                 ui.label("🔍");
@@ -1621,8 +1390,8 @@ impl SysTraceApp {
                     panels::render_no_selection(ui);
                 }
             }
-            TelemetryTab::Detection => {
-                self.render_hunt_tab(ui);
+            TelemetryTab::Timeline => {
+                self.render_timeline_tab(ui);
             }
         }
     }
@@ -1880,9 +1649,6 @@ impl eframe::App for SysTraceApp {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             self.render_status_bar(ui);
         });
-
-        // Hunt timeline popup (floating window)
-        self.render_hunt_timeline_popup(ctx);
 
         // Process tree (left side panel)
         egui::SidePanel::left("process_tree_panel")

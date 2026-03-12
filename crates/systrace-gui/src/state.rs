@@ -37,7 +37,7 @@ pub enum TelemetryTab {
     Pipes,
     Injection,
     DriversModules,
-    Detection,
+    Timeline,
 }
 
 /// Metadata computed once file loading is complete.
@@ -94,17 +94,19 @@ pub struct AppState {
     pub bookmarks: HashMap<ProcessGuid, String>,
     /// Recently opened file paths (most recent first, max 10).
     pub recent_files: Vec<PathBuf>,
-    // ── Hunt tab ─────────────────────────────────────────────────────────────
-    /// Text filter used in the Hunt tab to narrow down the process list.
-    pub hunt_filter: String,
-    /// Processes checked/selected in the Hunt tab for timeline generation.
-    pub hunt_checked: HashSet<ProcessGuid>,
-    /// Whether the Hunt timeline popup is currently open.
-    pub hunt_popup_open: bool,
-    /// Pixels-per-second zoom for the hunt timeline popup (0 = auto-fit).
-    pub hunt_zoom: f64,
-    /// Seconds offset from global start shown at left edge of popup.
-    pub hunt_pan: f64,
+    // ── Timeline tab ──────────────────────────────────────────────────────────
+    /// Text filter for the process tree in the Timeline tab.
+    pub timeline_filter: String,
+    /// Processes checked/selected for timeline generation.
+    pub timeline_checked: HashSet<ProcessGuid>,
+    /// Cached sorted event indices (built on "Generate Timeline" click).
+    pub timeline_events: Vec<usize>,
+    /// Whether the timeline has been generated (shows event table vs placeholder).
+    pub timeline_generated: bool,
+    /// Sort/selection state for the timeline event table.
+    pub tab_timeline: TabState,
+    /// Text filter for the timeline event table rows.
+    pub timeline_event_filter: String,
 }
 
 impl Default for AppState {
@@ -135,11 +137,12 @@ impl Default for AppState {
             dark_mode: true,
             bookmarks: HashMap::new(),
             recent_files: Vec::new(),
-            hunt_filter: String::new(),
-            hunt_checked: HashSet::new(),
-            hunt_popup_open: false,
-            hunt_zoom: 0.0,
-            hunt_pan: 0.0,
+            timeline_filter: String::new(),
+            timeline_checked: HashSet::new(),
+            timeline_events: Vec::new(),
+            timeline_generated: false,
+            tab_timeline: TabState::default(),
+            timeline_event_filter: String::new(),
         }
     }
 }
