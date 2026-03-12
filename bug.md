@@ -3,6 +3,11 @@
 This file contains bugs and improvements found by manually reviewing and using the tool.
 
 ## Pending / New Findings
+- "Timeline" feature does not work, once click generated timeline, nothing displayed
+- Change "Event Type Filter" to Special Filter, it can include "Process integrity" filter (System, High, Medium, Low), Process run by specific user (filter changed based on how many users detected on that file), Process that made network connection, Persistence archive (run key, schedule task and etc.)
+- "Help" button at the top left beside "File" with option to help user understand how this tool work, including color guide (which color in which could indicates what)
+- Add "Stats" button which display statistics of the log file that was loaded for example, total of events, each stats of each event id, how many processes belong to each user, how many are high/system integrity process 
+- In "Process Details" it lacks what Sysmon Event ID 1 have like FileVersion, Description, Product, Company and OriginalFileName which is really important
 
 
 ## Resolved
