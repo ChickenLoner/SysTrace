@@ -1410,6 +1410,7 @@ impl SysTraceApp {
         let (
             ov_image, ov_pid, ov_guid_str, ov_cmdline, ov_user, ov_integrity, ov_logon_id,
             ov_computer, ov_start, ov_end, ov_hashes, ov_parent_image, ov_parent_pid,
+            ov_file_version, ov_description, ov_product, ov_company, ov_original_file_name,
         ) = match self.state.process_tree.get(&guid) {
             None => return,
             Some(node) => (
@@ -1432,6 +1433,11 @@ impl SysTraceApp {
                 node.hashes.clone().unwrap_or_else(|| "-".to_owned()),
                 node.parent_image.clone().unwrap_or_else(|| "-".to_owned()),
                 node.parent_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_owned()),
+                node.file_version.clone().unwrap_or_else(|| "-".to_owned()),
+                node.description.clone().unwrap_or_else(|| "-".to_owned()),
+                node.product.clone().unwrap_or_else(|| "-".to_owned()),
+                node.company.clone().unwrap_or_else(|| "-".to_owned()),
+                node.original_file_name.clone().unwrap_or_else(|| "-".to_owned()),
             ),
         };
         // process_tree borrow dropped here — can now use &mut self below
@@ -1502,6 +1508,11 @@ impl SysTraceApp {
                                 row!("Computer", ov_computer.as_str());
                                 row!("Start Time", ov_start.as_str());
                                 row!("End Time", ov_end.as_str());
+                                row!("File Version", ov_file_version.as_str());
+                                row!("Description", ov_description.as_str());
+                                row!("Product", ov_product.as_str());
+                                row!("Company", ov_company.as_str());
+                                row!("Original File Name", ov_original_file_name.as_str());
                                 // Split hashes into separate rows (MD5, SHA256, IMPHASH)
                                 {
                                     let mut md5 = "-";
