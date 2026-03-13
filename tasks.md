@@ -37,6 +37,7 @@ Timeline tab shows nothing after clicking "Generate Timeline".
 - `panels/timeline.rs:49` — returns early if `event_indices.is_empty()`
 
 **Steps:**
+- [ ] Find out how when generated timeline, a filter box appear on the right at the middle box and the timeline created on the left but we can not see, why can't we put filter on the top of the timeline so there is only 2 box in windows, process tree to select and timeline
 - [ ] Read `render_timeline_tree_node` fully to check checkbox state propagation
 - [ ] Trace data flow: checkbox → `timeline_checked` → Generate click → `events_for_process` → `timeline_events`
 - [ ] Test with `.claude/sysmon.json` sample data
