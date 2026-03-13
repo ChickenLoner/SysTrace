@@ -5,7 +5,7 @@
 ---
 
 ## Task 1: Add Missing Process Details Fields
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 Overview tab missing: FileVersion, Description, Product, Company, OriginalFileName.
 Data IS parsed in `EventDetail::ProcessCreate` (event.rs:162-166) but NOT stored in `ProcessNode`.
@@ -15,10 +15,10 @@ Data IS parsed in `EventDetail::ProcessCreate` (event.rs:162-166) but NOT stored
 - `crates/systrace-gui/src/app.rs` → `render_overview()` (~line 1399) — add 5 rows to details grid before hashes, each with right-click Copy
 
 **Steps:**
-- [ ] Add `file_version`, `description`, `product`, `company`, `original_file_name` to `ProcessNode`
-- [ ] Extract from `EventDetail::ProcessCreate` pattern match (currently using `..` to skip these)
-- [ ] Add rows in Overview tab details grid
-- [ ] Add right-click Copy context menu to each new field
+- [x] Add `file_version`, `description`, `product`, `company`, `original_file_name` to `ProcessNode`
+- [x] Extract from `EventDetail::ProcessCreate` pattern match (currently using `..` to skip these)
+- [x] Add rows in Overview tab details grid
+- [x] Add right-click Copy context menu to each new field
 
 ---
 
