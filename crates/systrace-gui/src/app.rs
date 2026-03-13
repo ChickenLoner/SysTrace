@@ -713,19 +713,18 @@ impl SysTraceApp {
         };
 
         let mut checked = self.state.timeline_checked.contains(&guid);
+        let rich_label = egui::RichText::new(&label).color(text_color);
 
         if children.is_empty() {
-            // Leaf node
-            ui.horizontal(|ui| {
-                if ui.checkbox(&mut checked, "").changed() {
-                    if checked {
-                        self.state.timeline_checked.insert(guid);
-                    } else {
-                        self.state.timeline_checked.remove(&guid);
-                    }
+            // Leaf node — checkbox label IS the clickable text; a separate ui.label
+            // would create a dead zone that looks clickable but doesn't toggle the box.
+            if ui.checkbox(&mut checked, rich_label).changed() {
+                if checked {
+                    self.state.timeline_checked.insert(guid);
+                } else {
+                    self.state.timeline_checked.remove(&guid);
                 }
-                ui.label(egui::RichText::new(&label).color(text_color));
-            });
+            }
         } else {
             // Parent node with collapsible children
             let id = egui::Id::new(("timeline_node", guid));
@@ -734,14 +733,14 @@ impl SysTraceApp {
             );
 
             cs.show_header(ui, |ui| {
-                if ui.checkbox(&mut checked, "").changed() {
+                // Label is part of the checkbox so the entire row text is clickable.
+                if ui.checkbox(&mut checked, rich_label).changed() {
                     if checked {
                         self.state.timeline_checked.insert(guid);
                     } else {
                         self.state.timeline_checked.remove(&guid);
                     }
                 }
-                ui.label(egui::RichText::new(&label).color(text_color));
             })
             .body(|ui| {
                 for child in children {

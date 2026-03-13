@@ -23,7 +23,7 @@ Data IS parsed in `EventDetail::ProcessCreate` (event.rs:162-166) but NOT stored
 ---
 
 ## Task 2: Fix Timeline Bug
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 Timeline tab shows nothing after clicking "Generate Timeline".
 

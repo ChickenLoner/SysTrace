@@ -128,6 +128,28 @@ fn event_type_index_consistent() {
     }
 }
 
+/// Simulate the "Select All → Generate Timeline" flow: every tree node GUID must
+/// produce at least some events via `events_for_process`, and the combined list must
+/// be non-empty.  This guards against the UI bug where `timeline_events` came up
+/// empty because checked process GUIDs had no entries in `by_process`.
+#[test]
+fn timeline_generation_finds_events() {
+    let (store, tree, _) = load_sample();
+
+    let mut indices: Vec<usize> = Vec::new();
+    for guid in tree.nodes.keys() {
+        indices.extend(store.events_for_process(guid).iter().copied());
+    }
+
+    assert!(
+        !indices.is_empty(),
+        "Generate Timeline should find events for tree nodes \
+         (tree_nodes={}, total_events={})",
+        tree.nodes.len(),
+        store.len()
+    );
+}
+
 // --- Unit tests (also runnable via `cargo test -p systrace-core`) ---
 
 #[test]
