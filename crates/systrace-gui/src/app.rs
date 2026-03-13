@@ -611,11 +611,13 @@ impl SysTraceApp {
                             for &guid in &self.state.timeline_checked {
                                 indices.extend(self.state.event_store.events_for_process(&guid));
                             }
-                            indices.sort_by_key(|&i| self.state.event_store.events[i].time_created);
+                            indices.sort_unstable();
                             indices.dedup();
+                            indices.sort_by_key(|&i| self.state.event_store.events[i].time_created);
                             self.state.timeline_events = indices;
                             self.state.timeline_generated = true;
                             self.state.tab_timeline.selected_row = None;
+                            self.state.timeline_event_filter.clear();
                         }
                     });
 
@@ -638,7 +640,7 @@ impl SysTraceApp {
             ui.separator();
 
             // ── Right: event table ──────────────────────────────────────────
-            ui.allocate_ui(ui.available_size(), |ui| {
+            ui.allocate_ui(egui::vec2(ui.available_width(), available.y), |ui| {
                 if !self.state.timeline_generated {
                     panels::render_empty(ui, "Select processes and click Generate Timeline.");
                     return;
