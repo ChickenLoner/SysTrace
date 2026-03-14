@@ -27,26 +27,20 @@ Data IS parsed in `EventDetail::ProcessCreate` (event.rs:162-166) but NOT stored
 
 Timeline tab shows nothing after clicking "Generate Timeline".
 
-**Files:**
-- `crates/systrace-gui/src/app.rs` → `render_timeline_tab()` (lines 557-673) + `render_timeline_tree_node()` (line 675)
-- `crates/systrace-gui/src/panels/timeline.rs` → `render_timeline_table()` (line 40)
-
-**Debug points:**
-- `app.rs:609-617` — Generate button collects events via `events_for_process(&guid)` from `timeline_checked: HashSet<ProcessGuid>`
-- `app.rs:675` — verify checkboxes actually toggle `timeline_checked`
-- `panels/timeline.rs:49` — returns early if `event_indices.is_empty()`
+**Resolution:** Removed duplicate process tree inside Timeline tab. Checkboxes now appear on the existing left-panel process tree when Timeline tab is active. Select All / Deselect All / Generate Timeline controls in left panel header. Timeline tab uses full central panel width for event table only.
 
 **Steps:**
-- [ ] Find out how when generated timeline, a filter box appear on the right at the middle box and the timeline created on the left but we can not see, why can't we put filter on the top of the timeline so there is only 2 box in windows, process tree to select and timeline
-- [ ] Read `render_timeline_tree_node` fully to check checkbox state propagation
-- [ ] Trace data flow: checkbox → `timeline_checked` → Generate click → `events_for_process` → `timeline_events`
-- [ ] Test with `.claude/sysmon.json` sample data
-- [ ] Fix root cause and confirm events populate
+- [x] Remove duplicate process tree from Timeline tab
+- [x] Add checkboxes to render_tree_node when active_tab == Timeline
+- [x] Move Select All / Deselect All / Generate Timeline to left panel header
+- [x] Simplify render_timeline_tab to full-width event table only
+- [x] Remove render_timeline_tree_node, timeline_node_matches, timeline_subtree_matches
+- [x] Remove redundant timeline_filter state field
 
 ---
 
 ## Task 3: Detection Tab (Invisible Event Types)
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 EventId 2, 4, 9, 16, 19-21, 24 are parsed into `EventDetail` variants but NO panel displays them. Investigators can't see anti-forensics, WMI persistence, or clipboard activity.
 
@@ -65,11 +59,11 @@ EventId 2, 4, 9, 16, 19-21, 24 are parsed into `EventDetail` variants but NO pan
 - `crates/systrace-gui/src/app.rs` — add Detection tab button + render call
 
 **Steps:**
-- [ ] Create `detection.rs` with typed row struct and `render_detection_table()`
-- [ ] Use `events_for_process_and_types(guid, &[2, 4, 9, 16, 19, 20, 21, 24])`
-- [ ] Group events with colored section headers per category
-- [ ] Register module, add tab enum variant, add TabState
-- [ ] Add tab button and render call in telemetry panel
+- [x] Create `detection.rs` with typed row struct and `render_detection_table()`
+- [x] Use `events_for_process_and_types(guid, &[2, 4, 9, 16, 19, 20, 21, 24])`
+- [x] Color-coded event type column per category (Anti-Forensics red, Defense Evasion orange, WMI purple, Data Access cyan) + legend
+- [x] Register module, add tab enum variant, add TabState
+- [x] Add tab button and render call in telemetry panel
 
 ---
 

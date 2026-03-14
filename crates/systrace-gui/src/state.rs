@@ -37,6 +37,7 @@ pub enum TelemetryTab {
     Pipes,
     Injection,
     DriversModules,
+    Detection,
     Timeline,
 }
 
@@ -73,6 +74,7 @@ pub struct AppState {
     pub tab_pipes: TabState,
     pub tab_injection: TabState,
     pub tab_drivers: TabState,
+    pub tab_detection: TabState,
     /// Global text filter applied to all telemetry table panels simultaneously.
     pub telemetry_filter: String,
     /// Event category checkboxes for narrowing the process tree.
@@ -125,6 +127,7 @@ impl Default for AppState {
             tab_pipes: TabState::default(),
             tab_injection: TabState::default(),
             tab_drivers: TabState::default(),
+            tab_detection: TabState::default(),
             telemetry_filter: String::new(),
             tree_event_filter: TreeEventFilter::default(),
             flat_visible: Vec::new(),

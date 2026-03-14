@@ -1109,6 +1109,7 @@ impl SysTraceApp {
             TelemetryTab::Pipes,
             TelemetryTab::Injection,
             TelemetryTab::DriversModules,
+            TelemetryTab::Detection,
             TelemetryTab::Timeline,
         ];
         let (tab_forward, tab_backward) = ui.ctx().input(|i| {
@@ -1138,6 +1139,7 @@ impl SysTraceApp {
                 (TelemetryTab::Pipes, "Pipes"),
                 (TelemetryTab::Injection, "Injection"),
                 (TelemetryTab::DriversModules, "Modules"),
+                (TelemetryTab::Detection, "Detection"),
                 (TelemetryTab::Timeline, "Timeline"),
             ] {
                 if ui
@@ -1269,6 +1271,20 @@ impl SysTraceApp {
                         &self.state.event_store,
                         guid,
                         &mut self.state.tab_drivers,
+                        &filter,
+                        time_range,
+                    );
+                } else {
+                    panels::render_no_selection(ui);
+                }
+            }
+            TelemetryTab::Detection => {
+                if let Some(guid) = self.state.selected_process {
+                    panels::detection::render_detection_table(
+                        ui,
+                        &self.state.event_store,
+                        guid,
+                        &mut self.state.tab_detection,
                         &filter,
                         time_range,
                     );
