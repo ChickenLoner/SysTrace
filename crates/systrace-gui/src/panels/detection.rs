@@ -51,18 +51,20 @@ struct DetectionRow {
     col_a: String,      // primary detail column (context-dependent)
     col_b: String,      // secondary detail
     col_c: String,      // tertiary detail
+    mitre: String,
 }
 
 impl DetectionRow {
     fn copy_text(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             fmt_time(self.time),
             self.event_type,
             self.col_a,
             self.col_b,
             self.col_c,
             self.category.label(),
+            self.mitre,
         )
     }
 }
@@ -104,6 +106,7 @@ pub fn render_detection_table(
                     col_a: target_filename.clone().unwrap_or_default(),
                     col_b: creation_utc_time.clone().unwrap_or_default(),
                     col_c: previous_creation_utc_time.clone().unwrap_or_default(),
+                    mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                 }),
 
                 // EventId 9: RawAccessRead — Anti-Forensics
@@ -114,6 +117,7 @@ pub fn render_detection_table(
                     col_a: device.clone().unwrap_or_default(),
                     col_b: String::new(),
                     col_c: String::new(),
+                    mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                 }),
 
                 // EventId 4: SysmonServiceState — Defense Evasion (stored as Generic)
@@ -124,6 +128,7 @@ pub fn render_detection_table(
                     col_a: fields.get("State").cloned().unwrap_or_default(),
                     col_b: fields.get("Version").cloned().unwrap_or_default(),
                     col_c: String::new(),
+                    mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                 }),
 
                 // EventId 16: SysmonConfigChange — Defense Evasion
@@ -137,6 +142,7 @@ pub fn render_detection_table(
                     col_a: configuration.clone().unwrap_or_default(),
                     col_b: configuration_file_hash.clone().unwrap_or_default(),
                     col_c: String::new(),
+                    mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                 }),
 
                 // EventId 19-21: WmiActivity — WMI Persistence
@@ -156,6 +162,7 @@ pub fn render_detection_table(
                         .or_else(|| query.clone())
                         .unwrap_or_default(),
                     col_c: destination.clone().unwrap_or_default(),
+                    mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                 }),
 
                 // EventId 24: ClipboardChange — Data Access
@@ -170,6 +177,7 @@ pub fn render_detection_table(
                     col_a: session.clone().unwrap_or_default(),
                     col_b: client_info.clone().unwrap_or_default(),
                     col_c: hashes.clone().unwrap_or_default(),
+                    mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                 }),
 
                 _ => None,
@@ -198,12 +206,13 @@ pub fn render_detection_table(
         2 => rows.sort_by(|a, b| cmp_ord(a.col_a.cmp(&b.col_a), sort_asc)),
         3 => rows.sort_by(|a, b| cmp_ord(a.col_b.cmp(&b.col_b), sort_asc)),
         4 => rows.sort_by(|a, b| cmp_ord(a.col_c.cmp(&b.col_c), sort_asc)),
+        5 => rows.sort_by(|a, b| cmp_ord(a.mitre.cmp(&b.mitre), sort_asc)),
         _ => {}
     }
 
     let selected = tab.selected_row;
     let headers = make_headers(
-        &["Time", "Event", "Detail A", "Detail B", "Detail C"],
+        &["Time", "Event", "Detail A", "Detail B", "Detail C", "MITRE"],
         &tab.sort,
     );
 
@@ -236,7 +245,8 @@ pub fn render_detection_table(
             .column(Column::initial(130.0).clip(true))  // Event
             .column(Column::initial(200.0).clip(true))  // Detail A
             .column(Column::initial(200.0).clip(true))  // Detail B
-            .column(Column::remainder().clip(true).at_least(120.0)) // Detail C
+            .column(Column::initial(120.0).clip(true))  // Detail C
+            .column(Column::remainder().clip(true).at_least(80.0))  // MITRE
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
@@ -260,6 +270,11 @@ pub fn render_detection_table(
                     row.col(|ui| { ui.label(&r.col_a); });
                     row.col(|ui| { ui.label(&r.col_b); });
                     row.col(|ui| { ui.label(&r.col_c); });
+                    row.col(|ui| {
+                        if !r.mitre.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(220, 120, 60), &r.mitre);
+                        }
+                    });
 
                     let resp = row.response();
                     if resp.clicked() {
@@ -292,6 +307,10 @@ pub fn render_detection_table(
                                 ui.ctx().copy_text(r.col_c.clone());
                                 ui.close_menu();
                             }
+                        }
+                        if !r.mitre.is_empty() && ui.button("Copy MITRE").clicked() {
+                            ui.ctx().copy_text(r.mitre.clone());
+                            ui.close_menu();
                         }
                     });
                 });

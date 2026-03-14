@@ -13,16 +13,18 @@ struct FileRow {
     action: &'static str,
     filename: String,
     hashes: String,
+    mitre: String,
 }
 
 impl FileRow {
     fn copy_text(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}",
             fmt_time(self.time),
             self.action,
             self.filename,
             self.hashes,
+            self.mitre,
         )
     }
 }
@@ -63,30 +65,35 @@ pub fn render_file_activity(
         .filter_map(|&i| {
             let ev = &event_store.events[i];
             let action = action_for_id(ev.event_id);
+            let mitre = ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default();
             match &ev.detail {
                 EventDetail::FileCreate { target_filename, .. } => Some(FileRow {
                     time: ev.time_created,
                     action,
                     filename: target_filename.clone().unwrap_or_default(),
                     hashes: String::new(),
+                    mitre,
                 }),
                 EventDetail::FileCreateStreamHash { target_filename, hash, .. } => Some(FileRow {
                     time: ev.time_created,
                     action,
                     filename: target_filename.clone().unwrap_or_default(),
                     hashes: hash.clone().unwrap_or_default(),
+                    mitre,
                 }),
                 EventDetail::FileDeleteEvent { target_filename, hashes, .. } => Some(FileRow {
                     time: ev.time_created,
                     action,
                     filename: target_filename.clone().unwrap_or_default(),
                     hashes: hashes.clone().unwrap_or_default(),
+                    mitre,
                 }),
                 EventDetail::FileCreateTime { target_filename, .. } => Some(FileRow {
                     time: ev.time_created,
                     action: "Timestomp",
                     filename: target_filename.clone().unwrap_or_default(),
                     hashes: String::new(),
+                    mitre,
                 }),
                 _ => None,
             }
@@ -112,11 +119,12 @@ pub fn render_file_activity(
         1 => rows.sort_by(|a, b| cmp_ord(a.action.cmp(b.action), sort_asc)),
         2 => rows.sort_by(|a, b| cmp_ord(a.filename.cmp(&b.filename), sort_asc)),
         3 => rows.sort_by(|a, b| cmp_ord(a.hashes.cmp(&b.hashes), sort_asc)),
+        4 => rows.sort_by(|a, b| cmp_ord(a.mitre.cmp(&b.mitre), sort_asc)),
         _ => {}
     }
 
     let selected = tab.selected_row;
-    let headers = make_headers(&["Time", "Action", "Target Filename", "Hashes"], &tab.sort);
+    let headers = make_headers(&["Time", "Action", "Target Filename", "Hashes", "MITRE"], &tab.sort);
 
     let mut next_sort: Option<usize> = None;
     let mut next_selected = selected;
@@ -129,8 +137,9 @@ pub fn render_file_activity(
             .sense(egui::Sense::click())
             .column(Column::initial(185.0).clip(true))  // Time
             .column(Column::initial(120.0).clip(true))  // Action
-            .column(Column::remainder().clip(true).at_least(260.0)) // Path
-            .column(Column::initial(200.0).clip(true))  // Extension / Detail
+            .column(Column::initial(260.0).clip(true))  // Path
+            .column(Column::initial(200.0).clip(true))  // Hashes
+            .column(Column::remainder().clip(true).at_least(80.0))  // MITRE
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
@@ -149,6 +158,11 @@ pub fn render_file_activity(
                     row.col(|ui| { ui.label(r.action); });
                     row.col(|ui| { ui.label(&r.filename); });
                     row.col(|ui| { ui.label(&r.hashes); });
+                    row.col(|ui| {
+                        if !r.mitre.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(220, 120, 60), &r.mitre);
+                        }
+                    });
                     let resp = row.response();
                     if resp.clicked() {
                         next_selected = Some(i);
@@ -173,6 +187,10 @@ pub fn render_file_activity(
                         }
                         if ui.button("Copy Hashes").clicked() {
                             ui.ctx().copy_text(r.hashes.clone());
+                            ui.close_menu();
+                        }
+                        if !r.mitre.is_empty() && ui.button("Copy MITRE").clicked() {
+                            ui.ctx().copy_text(r.mitre.clone());
                             ui.close_menu();
                         }
                     });

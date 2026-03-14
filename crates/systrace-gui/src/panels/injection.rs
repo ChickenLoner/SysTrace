@@ -15,18 +15,20 @@ struct InjectionRow {
     source: String,
     target: String,
     details: String,
+    mitre: String,
 }
 
 impl InjectionRow {
     fn copy_text(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             fmt_time(self.time),
             self.kind,
             self.role,
             self.source,
             self.target,
             self.details,
+            self.mitre,
         )
     }
 }
@@ -93,6 +95,7 @@ pub fn render_injection(
                         source: source_image.clone().unwrap_or_default(),
                         target: target_image.clone().unwrap_or_default(),
                         details,
+                        mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                     })
                 }
                 EventDetail::ProcessAccess {
@@ -117,6 +120,7 @@ pub fn render_injection(
                         source: source_image.clone().unwrap_or_default(),
                         target: target_image.clone().unwrap_or_default(),
                         details: granted_access.clone().unwrap_or_default(),
+                        mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                     })
                 }
                 EventDetail::ProcessTampering { tampering_type } => Some(InjectionRow {
@@ -126,6 +130,7 @@ pub fn render_injection(
                     source: String::new(),
                     target: String::new(),
                     details: tampering_type.clone().unwrap_or_default(),
+                    mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                 }),
                 _ => None,
             }
@@ -153,12 +158,13 @@ pub fn render_injection(
         3 => rows.sort_by(|a, b| cmp_ord(a.source.cmp(&b.source), sort_asc)),
         4 => rows.sort_by(|a, b| cmp_ord(a.target.cmp(&b.target), sort_asc)),
         5 => rows.sort_by(|a, b| cmp_ord(a.details.cmp(&b.details), sort_asc)),
+        6 => rows.sort_by(|a, b| cmp_ord(a.mitre.cmp(&b.mitre), sort_asc)),
         _ => {}
     }
 
     let selected = tab.selected_row;
     let headers = make_headers(
-        &["Time", "Type", "Role", "Source", "Target", "Details"],
+        &["Time", "Type", "Role", "Source", "Target", "Details", "MITRE"],
         &tab.sort,
     );
 
@@ -176,7 +182,8 @@ pub fn render_injection(
             .column(Column::initial(80.0).clip(true))   // Role
             .column(Column::initial(220.0).clip(true))  // Source
             .column(Column::initial(220.0).clip(true))  // Target
-            .column(Column::remainder().clip(true).at_least(160.0)) // Details
+            .column(Column::initial(160.0).clip(true))  // Details
+            .column(Column::remainder().clip(true).at_least(80.0))  // MITRE
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
@@ -197,6 +204,11 @@ pub fn render_injection(
                     row.col(|ui| { ui.label(&r.source); });
                     row.col(|ui| { ui.label(&r.target); });
                     row.col(|ui| { ui.label(&r.details); });
+                    row.col(|ui| {
+                        if !r.mitre.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(220, 120, 60), &r.mitre);
+                        }
+                    });
                     let resp = row.response();
                     if resp.clicked() {
                         next_selected = Some(i);
@@ -225,6 +237,10 @@ pub fn render_injection(
                         }
                         if ui.button("Copy Details").clicked() {
                             ui.ctx().copy_text(r.details.clone());
+                            ui.close_menu();
+                        }
+                        if !r.mitre.is_empty() && ui.button("Copy MITRE").clicked() {
+                            ui.ctx().copy_text(r.mitre.clone());
                             ui.close_menu();
                         }
                     });

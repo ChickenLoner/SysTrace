@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 use systrace_core::{EventStore, ProcessGuid, ProcessTree, Timestamp};
@@ -24,6 +24,15 @@ impl TreeEventFilter {
         self.network || self.files || self.registry
             || self.pipes || self.injection || self.drivers
     }
+}
+
+/// Which tab is active in the Help window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HelpTab {
+    #[default]
+    ColorGuide,
+    KeyboardShortcuts,
+    FeatureGuide,
 }
 
 /// Which telemetry tab is active.
@@ -79,6 +88,14 @@ pub struct AppState {
     pub telemetry_filter: String,
     /// Event category checkboxes for narrowing the process tree.
     pub tree_event_filter: TreeEventFilter,
+    /// MITRE technique IDs available in the loaded file.
+    pub available_mitre: BTreeSet<String>,
+    /// MITRE technique IDs whose checkboxes are active (filter: show processes with these techniques).
+    pub mitre_filter: HashSet<String>,
+    /// Whether the Help window is open.
+    pub show_help: bool,
+    /// Active tab inside the Help window.
+    pub help_tab: HelpTab,
     /// Pre-order visible node list for keyboard navigation (rebuilt each frame).
     pub flat_visible: Vec<ProcessGuid>,
     /// When true, the next render of the selected node calls scroll_to_me().
@@ -130,6 +147,10 @@ impl Default for AppState {
             tab_detection: TabState::default(),
             telemetry_filter: String::new(),
             tree_event_filter: TreeEventFilter::default(),
+            available_mitre: BTreeSet::new(),
+            mitre_filter: HashSet::new(),
+            show_help: false,
+            help_tab: HelpTab::default(),
             flat_visible: Vec::new(),
             scroll_to_selected: false,
             rodeo: systrace_core::new_rodeo(),

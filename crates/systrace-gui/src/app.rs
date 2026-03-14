@@ -8,7 +8,7 @@ use eframe::egui::{self, Ui};
 use systrace_core::{ProcessGuid, SysmonEvent};
 
 use crate::panels;
-use crate::state::{AppState, FileMetadata, TelemetryTab, TreeEventFilter};
+use crate::state::{AppState, FileMetadata, HelpTab, TelemetryTab, TreeEventFilter};
 
 /// Maximum event batches processed per UI frame to keep the frame time bounded.
 const MAX_BATCHES_PER_FRAME: usize = 20;
@@ -241,6 +241,16 @@ impl SysTraceApp {
             time_range,
             computer_names,
         });
+
+        // Collect unique MITRE technique IDs across all events.
+        self.state.available_mitre = self
+            .state
+            .event_store
+            .events
+            .iter()
+            .filter_map(|ev| ev.mitre_technique.as_ref().map(|m| m.id.clone()))
+            .collect();
+        self.state.mitre_filter.clear();
     }
 
 
@@ -366,9 +376,34 @@ impl SysTraceApp {
 
     fn node_passes_event_filter(&self, guid: &ProcessGuid) -> bool {
         let f = &self.state.tree_event_filter;
-        if !f.any_active() {
+        let mitre_active = !self.state.mitre_filter.is_empty();
+        if !f.any_active() && !mitre_active {
             return true;
         }
+
+        // MITRE filter: process must have at least one event matching a checked technique.
+        if mitre_active {
+            let has_match = self
+                .state
+                .event_store
+                .events_for_process(guid)
+                .iter()
+                .any(|&idx| {
+                    self.state.event_store.events[idx]
+                        .mitre_technique
+                        .as_ref()
+                        .map(|m| self.state.mitre_filter.contains(&m.id))
+                        .unwrap_or(false)
+                });
+            if !has_match {
+                return false;
+            }
+            // If only MITRE filter is active (no event type filters), return true here.
+            if !f.any_active() {
+                return true;
+            }
+        }
+
         if f.network
             && !self
                 .state
@@ -659,6 +694,10 @@ impl SysTraceApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+
+            if ui.button("Help").clicked() {
+                self.state.show_help = !self.state.show_help;
+            }
         });
     }
 
@@ -812,6 +851,30 @@ impl SysTraceApp {
                         self.state.tree_event_filter = TreeEventFilter::default();
                     }
                 });
+
+            // MITRE Techniques filter (only shown when file is loaded with MITRE data)
+            if !self.state.available_mitre.is_empty() {
+                let mitre_ids: Vec<String> = self.state.available_mitre.iter().cloned().collect();
+                egui::CollapsingHeader::new("MITRE Techniques")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for id in &mitre_ids {
+                            let mut checked = self.state.mitre_filter.contains(id);
+                            if ui.checkbox(&mut checked, id.as_str()).changed() {
+                                if checked {
+                                    self.state.mitre_filter.insert(id.clone());
+                                } else {
+                                    self.state.mitre_filter.remove(id);
+                                }
+                            }
+                        }
+                        if !self.state.mitre_filter.is_empty()
+                            && ui.small_button("Clear All").clicked()
+                        {
+                            self.state.mitre_filter.clear();
+                        }
+                    });
+            }
         }
 
         ui.separator();
@@ -1526,6 +1589,182 @@ impl SysTraceApp {
                 );
             });
     }
+    // -----------------------------------------------------------------------
+    // Help window
+    // -----------------------------------------------------------------------
+
+    fn render_help_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.state.show_help;
+        egui::Window::new("Help")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(520.0)
+            .default_height(420.0)
+            .show(ctx, |ui| {
+                // Tab bar
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (HelpTab::ColorGuide, "Color Guide"),
+                        (HelpTab::KeyboardShortcuts, "Keyboard Shortcuts"),
+                        (HelpTab::FeatureGuide, "Feature Guide"),
+                    ] {
+                        if ui.selectable_label(self.state.help_tab == tab, label).clicked() {
+                            self.state.help_tab = tab;
+                        }
+                    }
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    match self.state.help_tab {
+                        HelpTab::ColorGuide => self.render_help_color_guide(ui),
+                        HelpTab::KeyboardShortcuts => self.render_help_shortcuts(ui),
+                        HelpTab::FeatureGuide => self.render_help_feature_guide(ui),
+                    }
+                });
+            });
+        self.state.show_help = open;
+    }
+
+    fn render_help_color_guide(&self, ui: &mut egui::Ui) {
+        let swatch = |ui: &mut egui::Ui, color: egui::Color32, label: &str| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(16.0, 16.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().rect_filled(rect, 2.0, color);
+                ui.label(label);
+            });
+        };
+
+        ui.strong("Process Tree Colors");
+        ui.add_space(4.0);
+        swatch(ui, egui::Color32::DARK_GRAY,              "Synthetic — process inferred from parent GUID, no EventId 1");
+        swatch(ui, egui::Color32::from_rgb(220, 60, 60),  "Injection target — process was accessed/injected into");
+        swatch(ui, egui::Color32::from_rgb(80, 180, 80),  "SYSTEM user — process running as SYSTEM");
+        swatch(ui, egui::Color32::from_rgb(180, 180, 100),"Terminated — EventId 5 (ProcessTerminate) seen");
+        ui.label("(default)  Normal process");
+
+        ui.add_space(10.0);
+        ui.strong("Event / Panel Colors");
+        ui.add_space(4.0);
+        swatch(ui, egui::Color32::from_rgb(60, 130, 220),  "Network — EventId 3/22");
+        swatch(ui, egui::Color32::from_rgb(80, 180, 80),   "Files — EventId 11/15/23/26/27/28/29");
+        swatch(ui, egui::Color32::from_rgb(220, 140, 40),  "Registry — EventId 12/13/14");
+        swatch(ui, egui::Color32::from_rgb(220, 60, 60),   "Injection — EventId 8/10/25");
+        swatch(ui, egui::Color32::from_rgb(160, 80, 220),  "Pipes — EventId 17/18");
+        swatch(ui, egui::Color32::from_rgb(80, 180, 220),  "Drivers/Modules — EventId 6/7");
+
+        ui.add_space(10.0);
+        ui.strong("Integrity Level Colors (Overview tab)");
+        ui.add_space(4.0);
+        swatch(ui, egui::Color32::from_rgb(220, 60, 60),  "System integrity");
+        swatch(ui, egui::Color32::from_rgb(255, 165, 0),  "High integrity");
+        ui.label("(default)  Medium / Low integrity");
+
+        ui.add_space(10.0);
+        ui.strong("MITRE ATT&CK");
+        ui.add_space(4.0);
+        swatch(ui, egui::Color32::from_rgb(220, 120, 60), "MITRE technique ID (shown in all telemetry columns)");
+        ui.label("  ⚑ flag prefix in tree = process has at least one MITRE-tagged event");
+    }
+
+    fn render_help_shortcuts(&self, ui: &mut egui::Ui) {
+        let shortcuts: &[(&str, &str)] = &[
+            ("Ctrl+O",           "Open file dialog"),
+            ("Ctrl+F",           "Focus process search box"),
+            ("Arrow Up/Down",    "Navigate process tree (when search not focused)"),
+            ("Ctrl+Tab",         "Cycle to next telemetry tab"),
+            ("Ctrl+Shift+Tab",   "Cycle to previous telemetry tab"),
+            ("Click row",        "Select telemetry table row"),
+            ("Click column header", "Sort telemetry table by that column (toggles asc/desc)"),
+            ("Right-click row",  "Copy individual columns or full row"),
+            ("Right-click tree node", "Copy GUID, command line; expand all children"),
+            ("Drag & Drop",      "Drop a .json / .ndjson file onto the window to open it"),
+        ];
+
+        egui::Grid::new("shortcuts_grid")
+            .num_columns(2)
+            .striped(true)
+            .min_col_width(180.0)
+            .show(ui, |ui| {
+                ui.strong("Shortcut");
+                ui.strong("Action");
+                ui.end_row();
+                for (key, action) in shortcuts {
+                    ui.label(egui::RichText::new(*key).monospace());
+                    ui.label(*action);
+                    ui.end_row();
+                }
+            });
+    }
+
+    fn render_help_feature_guide(&self, ui: &mut egui::Ui) {
+        let section = |ui: &mut egui::Ui, title: &str, body: &str| {
+            ui.strong(title);
+            ui.add_space(2.0);
+            ui.label(body);
+            ui.add_space(8.0);
+        };
+
+        section(ui, "Process Tree (left panel)",
+            "Shows all processes from Sysmon EventId 1. Click a node to select it and view its \
+             telemetry. Use the search box to filter by name, PID, user, or command line. \
+             Expand All / Collapse All control the tree depth. Event Type Filter and MITRE \
+             Techniques filters narrow the tree to processes with matching events.");
+
+        section(ui, "Overview tab",
+            "Shows process metadata (image path, PID, GUID, command line, user, integrity, \
+             hashes, parent). Below that: per-category event counts. If any events carry \
+             MITRE ATT&CK annotations they appear in the MITRE ATT&CK section. \
+             The Notes field lets you attach investigation notes to a process.");
+
+        section(ui, "Network tab",
+            "EventId 3 (NetworkConnect) and 22 (DnsQuery) for the selected process. \
+             Columns: Time, Direction (Outbound/Inbound/DNS), Protocol, Source, Destination, \
+             Hostname, MITRE.");
+
+        section(ui, "Files tab",
+            "File system events: EventId 11 (Create), 15 (ADS Stream), 23/26 (Delete), \
+             27/28/29 (Block/Exec). Columns: Time, Action, Target Filename, Hashes, MITRE.");
+
+        section(ui, "Registry tab",
+            "Registry events: EventId 12 (Create/Delete key), 13 (SetValue), 14 (Rename). \
+             Columns: Time, Action, Target Object, Details, MITRE.");
+
+        section(ui, "Pipes tab",
+            "Named pipe events: EventId 17 (Create), 18 (Connect). \
+             Columns: Time, Action, Pipe Name, MITRE.");
+
+        section(ui, "Injection tab",
+            "Process injection events: EventId 8 (CreateRemoteThread), 10 (ProcessAccess), \
+             25 (ProcessTampering). Shows both source and target side for the selected process. \
+             Columns: Time, Type, Role, Source, Target, Details, MITRE.");
+
+        section(ui, "Modules tab",
+            "Driver/image loads: EventId 6 (DriverLoad), 7 (ImageLoad). \
+             Columns: Time, Type, Image Loaded, Signature, Status, MITRE.");
+
+        section(ui, "Detection tab",
+            "Suspicious events not shown elsewhere: EventId 2 (FileCreateTime/timestomp), \
+             4 (SysmonState), 9 (RawAccessRead), 16 (ConfigChange), 19-21 (WMI), \
+             24 (ClipboardChange). Color-coded by category with legend.");
+
+        section(ui, "Timeline tab",
+            "Cross-process event timeline. Check processes in the tree, then click \
+             Generate Timeline to see all their events sorted by time in one table.");
+
+        section(ui, "Filters",
+            "Event Type Filter: show only processes with selected event categories. \
+             MITRE Techniques: show only processes whose events are tagged with selected \
+             technique IDs. Both filters are OR within a category and AND across categories.");
+
+        section(ui, "Export (File menu)",
+            "Events as CSV — all events with time, EventID, type, computer, image, user. \
+             Events as JSON — same data as JSON array. \
+             Process Tree as DOT — Graphviz dot file for visualisation.");
+    }
 }
 
 impl eframe::App for SysTraceApp {
@@ -1557,6 +1796,11 @@ impl eframe::App for SysTraceApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             self.render_menu(ui, ctx);
         });
+
+        // Help window (floating)
+        if self.state.show_help {
+            self.render_help_window(ctx);
+        }
 
         // Status bar (registered first so it appears at the very bottom)
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
