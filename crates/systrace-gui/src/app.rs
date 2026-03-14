@@ -695,6 +695,10 @@ impl SysTraceApp {
                 }
             });
 
+            if ui.button("Stats").clicked() {
+                self.state.show_stats = !self.state.show_stats;
+            }
+
             if ui.button("Help").clicked() {
                 self.state.show_help = !self.state.show_help;
             }
@@ -1590,6 +1594,268 @@ impl SysTraceApp {
             });
     }
     // -----------------------------------------------------------------------
+    // Stats popup
+    // -----------------------------------------------------------------------
+
+    fn render_stats_window(&mut self, ctx: &egui::Context) {
+        use crate::panels::event_label;
+
+        let mut open = self.state.show_stats;
+
+        egui::Window::new("Statistics")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(540.0)
+            .default_height(500.0)
+            .show(ctx, |ui| {
+                let rodeo = self.state.rodeo.clone();
+
+                // ── Determine host filter ─────────────────────────────────
+                let host_filter = self.state.selected_host.as_deref();
+
+                // ── Collect filtered events ───────────────────────────────
+                let total_events = self.state.event_store.len();
+                let filtered_events: Vec<&systrace_core::SysmonEvent> = self
+                    .state
+                    .event_store
+                    .events
+                    .iter()
+                    .filter(|ev| {
+                        if let Some(host) = host_filter {
+                            rodeo.resolve(&ev.computer) == host
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                let filtered_count = filtered_events.len();
+
+                // ── Time range ────────────────────────────────────────────
+                let time_range = if filtered_events.is_empty() {
+                    None
+                } else {
+                    let min_t = filtered_events.iter().map(|e| e.time_created).min();
+                    let max_t = filtered_events.iter().map(|e| e.time_created).max();
+                    min_t.zip(max_t)
+                };
+
+                // ── Per-EventID counts ────────────────────────────────────
+                let mut event_id_counts: std::collections::BTreeMap<u16, usize> =
+                    std::collections::BTreeMap::new();
+                for ev in &filtered_events {
+                    *event_id_counts.entry(ev.event_id).or_insert(0) += 1;
+                }
+
+                // ── Per-computer counts ───────────────────────────────────
+                let mut host_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for ev in &filtered_events {
+                    let computer = rodeo.resolve(&ev.computer).to_owned();
+                    *host_counts.entry(computer).or_insert(0) += 1;
+                }
+
+                // ── Process-level stats (nodes matching host filter) ──────
+                let mut user_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                let mut integrity_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for node in self.state.process_tree.nodes.values() {
+                    if let Some(host) = host_filter {
+                        if node.computer != host {
+                            continue;
+                        }
+                    }
+                    let user = node.user.as_deref().unwrap_or("(unknown)").to_owned();
+                    *user_counts.entry(user).or_insert(0) += 1;
+                    let il = node.integrity_level.as_deref().unwrap_or("(unknown)").to_owned();
+                    *integrity_counts.entry(il).or_insert(0) += 1;
+                }
+
+                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    // ── Summary ───────────────────────────────────────────
+                    ui.strong("Summary");
+                    ui.add_space(4.0);
+                    egui::Grid::new("stats_summary")
+                        .num_columns(2)
+                        .striped(true)
+                        .min_col_width(160.0)
+                        .show(ui, |ui| {
+                            ui.label("Total events");
+                            if host_filter.is_some() {
+                                ui.label(format!("{filtered_count} / {total_events}"));
+                            } else {
+                                ui.label(format!("{total_events}"));
+                            }
+                            ui.end_row();
+
+                            ui.label("Processes (tree nodes)");
+                            let proc_count = if host_filter.is_some() {
+                                user_counts.values().sum::<usize>()
+                            } else {
+                                self.state.process_tree.nodes.len()
+                            };
+                            ui.label(format!("{proc_count}"));
+                            ui.end_row();
+
+                            ui.label("Host filter");
+                            ui.label(host_filter.unwrap_or("All hosts"));
+                            ui.end_row();
+
+                            if let Some((t_min, t_max)) = time_range {
+                                ui.label("First event");
+                                ui.label(t_min.format("%Y-%m-%d %H:%M:%S UTC").to_string());
+                                ui.end_row();
+                                ui.label("Last event");
+                                ui.label(t_max.format("%Y-%m-%d %H:%M:%S UTC").to_string());
+                                ui.end_row();
+                                let duration = t_max - t_min;
+                                let total_secs = duration.num_seconds().abs();
+                                let h = total_secs / 3600;
+                                let m = (total_secs % 3600) / 60;
+                                let s = total_secs % 60;
+                                ui.label("Duration");
+                                ui.label(format!("{h}h {m}m {s}s"));
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.add_space(10.0);
+
+                    // ── Per-EventID breakdown ─────────────────────────────
+                    ui.strong("Event Type Breakdown");
+                    ui.add_space(4.0);
+                    egui::Grid::new("stats_event_ids")
+                        .num_columns(4)
+                        .striped(true)
+                        .min_col_width(60.0)
+                        .show(ui, |ui| {
+                            ui.strong("EventID");
+                            ui.strong("Name");
+                            ui.strong("Count");
+                            ui.strong("%");
+                            ui.end_row();
+
+                            for (eid, count) in &event_id_counts {
+                                ui.label(eid.to_string());
+                                ui.label(event_label(*eid));
+                                ui.label(count.to_string());
+                                let pct = if filtered_count > 0 {
+                                    (*count as f64 / filtered_count as f64) * 100.0
+                                } else {
+                                    0.0
+                                };
+                                ui.label(format!("{pct:.1}%"));
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.add_space(10.0);
+
+                    // ── Integrity distribution ────────────────────────────
+                    ui.strong("Integrity Level Distribution (Processes)");
+                    ui.add_space(4.0);
+                    if integrity_counts.is_empty() {
+                        ui.label("No process data loaded.");
+                    } else {
+                        let total_procs: usize = integrity_counts.values().sum();
+                        egui::Grid::new("stats_integrity")
+                            .num_columns(3)
+                            .striped(true)
+                            .min_col_width(100.0)
+                            .show(ui, |ui| {
+                                ui.strong("Integrity Level");
+                                ui.strong("Count");
+                                ui.strong("%");
+                                ui.end_row();
+
+                                for (il, count) in &integrity_counts {
+                                    ui.label(il.as_str());
+                                    ui.label(count.to_string());
+                                    let pct = if total_procs > 0 {
+                                        (*count as f64 / total_procs as f64) * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    ui.label(format!("{pct:.1}%"));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+
+                    ui.add_space(10.0);
+
+                    // ── Per-user process count ────────────────────────────
+                    ui.strong("Processes per User");
+                    ui.add_space(4.0);
+                    if user_counts.is_empty() {
+                        ui.label("No process data loaded.");
+                    } else {
+                        let total_procs: usize = user_counts.values().sum();
+                        egui::Grid::new("stats_users")
+                            .num_columns(3)
+                            .striped(true)
+                            .min_col_width(160.0)
+                            .show(ui, |ui| {
+                                ui.strong("User");
+                                ui.strong("Processes");
+                                ui.strong("%");
+                                ui.end_row();
+
+                                // Sort by count descending
+                                let mut user_vec: Vec<(&String, &usize)> = user_counts.iter().collect();
+                                user_vec.sort_by(|a, b| b.1.cmp(a.1));
+                                for (user, count) in user_vec {
+                                    ui.label(user.as_str());
+                                    ui.label(count.to_string());
+                                    let pct = if total_procs > 0 {
+                                        (*count as f64 / total_procs as f64) * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    ui.label(format!("{pct:.1}%"));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+
+                    ui.add_space(10.0);
+
+                    // ── Host breakdown ────────────────────────────────────
+                    if host_counts.len() > 1 {
+                        ui.strong("Host / Computer Breakdown");
+                        ui.add_space(4.0);
+                        egui::Grid::new("stats_hosts")
+                            .num_columns(3)
+                            .striped(true)
+                            .min_col_width(160.0)
+                            .show(ui, |ui| {
+                                ui.strong("Computer");
+                                ui.strong("Events");
+                                ui.strong("%");
+                                ui.end_row();
+
+                                let mut host_vec: Vec<(&String, &usize)> = host_counts.iter().collect();
+                                host_vec.sort_by(|a, b| b.1.cmp(a.1));
+                                for (computer, count) in host_vec {
+                                    ui.label(computer.as_str());
+                                    ui.label(count.to_string());
+                                    let pct = if total_events > 0 {
+                                        (*count as f64 / total_events as f64) * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    ui.label(format!("{pct:.1}%"));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+            });
+
+        self.state.show_stats = open;
+    }
+
+    // -----------------------------------------------------------------------
     // Help window
     // -----------------------------------------------------------------------
 
@@ -1796,6 +2062,11 @@ impl eframe::App for SysTraceApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             self.render_menu(ui, ctx);
         });
+
+        // Stats popup (floating)
+        if self.state.show_stats {
+            self.render_stats_window(ctx);
+        }
 
         // Help window (floating)
         if self.state.show_help {

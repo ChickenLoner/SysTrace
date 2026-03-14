@@ -92,6 +92,8 @@ pub struct AppState {
     pub available_mitre: BTreeSet<String>,
     /// MITRE technique IDs whose checkboxes are active (filter: show processes with these techniques).
     pub mitre_filter: HashSet<String>,
+    /// Whether the Stats popup is open.
+    pub show_stats: bool,
     /// Whether the Help window is open.
     pub show_help: bool,
     /// Active tab inside the Help window.
@@ -149,6 +151,7 @@ impl Default for AppState {
             tree_event_filter: TreeEventFilter::default(),
             available_mitre: BTreeSet::new(),
             mitre_filter: HashSet::new(),
+            show_stats: false,
             show_help: false,
             help_tab: HelpTab::default(),
             flat_visible: Vec::new(),

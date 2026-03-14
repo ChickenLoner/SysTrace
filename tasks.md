@@ -80,7 +80,7 @@ No help system exists. Add "Help" menu button next to "File" → tabbed floating
 ---
 
 ## Task 6: Stats Popup (Filter-Aware)
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 Add "Stats" button in menu bar → floating popup with statistics that update based on current filters.
 
@@ -97,12 +97,12 @@ Add "Stats" button in menu bar → floating popup with statistics that update ba
 - `crates/systrace-gui/src/app.rs` — add Stats button in `render_menu()`, implement `render_stats_window()`
 
 **Steps:**
-- [ ] Add state field
-- [ ] Add "Stats" button to menu bar
-- [ ] Implement `render_stats_window()` as `egui::Window`
-- [ ] Compute stats from EventStore, respect host filter + special filter
-- [ ] Display as formatted grid with counts and percentages
-- [ ] Reuse `event_label()` from `panels/mod.rs` for event type names
+- [x] Add state field
+- [x] Add "Stats" button to menu bar
+- [x] Implement `render_stats_window()` as `egui::Window`
+- [x] Compute stats from EventStore, respect host filter + special filter
+- [x] Display as formatted grid with counts and percentages
+- [x] Reuse `event_label()` from `panels/mod.rs` for event type names
 
 ---
 
