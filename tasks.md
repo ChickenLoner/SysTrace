@@ -26,7 +26,7 @@ New "Detection" tab shows EventIds 2, 4, 9, 16, 19-21, 24 that were previously i
 ---
 
 ## Task 4: MITRE ATT&CK Filter
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 `SysmonEvent.mitre_technique: Vec<String>` is parsed from RuleName (types.rs) but never displayed or used for filtering.
 
@@ -47,11 +47,11 @@ New "Detection" tab shows EventIds 2, 4, 9, 16, 19-21, 24 that were previously i
 - `crates/systrace-core/src/event_store.rs` — optionally add `by_mitre` index
 
 **Steps:**
-- [ ] Add MITRE state fields
-- [ ] Collect unique techniques on file load
-- [ ] Add MITRE column to all panel row structs and tables
-- [ ] Add MITRE filter section in sidebar
-- [ ] Integrate MITRE filter into `node_passes_event_filter()`
+- [x] Add MITRE state fields
+- [x] Collect unique techniques on file load
+- [x] Add MITRE column to all panel row structs and tables
+- [x] Add MITRE filter section in sidebar
+- [x] Integrate MITRE filter into `node_passes_event_filter()`
 
 ---
 
