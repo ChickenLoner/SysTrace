@@ -241,6 +241,16 @@ impl SysTraceApp {
             time_range,
             computer_names,
         });
+
+        // Collect unique MITRE technique IDs across all events.
+        self.state.available_mitre = self
+            .state
+            .event_store
+            .events
+            .iter()
+            .filter_map(|ev| ev.mitre_technique.as_ref().map(|m| m.id.clone()))
+            .collect();
+        self.state.mitre_filter.clear();
     }
 
 
@@ -366,9 +376,34 @@ impl SysTraceApp {
 
     fn node_passes_event_filter(&self, guid: &ProcessGuid) -> bool {
         let f = &self.state.tree_event_filter;
-        if !f.any_active() {
+        let mitre_active = !self.state.mitre_filter.is_empty();
+        if !f.any_active() && !mitre_active {
             return true;
         }
+
+        // MITRE filter: process must have at least one event matching a checked technique.
+        if mitre_active {
+            let has_match = self
+                .state
+                .event_store
+                .events_for_process(guid)
+                .iter()
+                .any(|&idx| {
+                    self.state.event_store.events[idx]
+                        .mitre_technique
+                        .as_ref()
+                        .map(|m| self.state.mitre_filter.contains(&m.id))
+                        .unwrap_or(false)
+                });
+            if !has_match {
+                return false;
+            }
+            // If only MITRE filter is active (no event type filters), return true here.
+            if !f.any_active() {
+                return true;
+            }
+        }
+
         if f.network
             && !self
                 .state
@@ -812,6 +847,30 @@ impl SysTraceApp {
                         self.state.tree_event_filter = TreeEventFilter::default();
                     }
                 });
+
+            // MITRE Techniques filter (only shown when file is loaded with MITRE data)
+            if !self.state.available_mitre.is_empty() {
+                let mitre_ids: Vec<String> = self.state.available_mitre.iter().cloned().collect();
+                egui::CollapsingHeader::new("MITRE Techniques")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for id in &mitre_ids {
+                            let mut checked = self.state.mitre_filter.contains(id);
+                            if ui.checkbox(&mut checked, id.as_str()).changed() {
+                                if checked {
+                                    self.state.mitre_filter.insert(id.clone());
+                                } else {
+                                    self.state.mitre_filter.remove(id);
+                                }
+                            }
+                        }
+                        if !self.state.mitre_filter.is_empty()
+                            && ui.small_button("Clear All").clicked()
+                        {
+                            self.state.mitre_filter.clear();
+                        }
+                    });
+            }
         }
 
         ui.separator();

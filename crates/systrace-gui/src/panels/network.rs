@@ -16,12 +16,13 @@ struct NetworkRow {
     destination: String,
     hostname: String,
     extra: String, // DNS query status or empty
+    mitre: String,
 }
 
 impl NetworkRow {
     fn copy_text(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             fmt_time(self.time),
             self.direction,
             self.protocol,
@@ -29,6 +30,7 @@ impl NetworkRow {
             self.destination,
             self.hostname,
             self.extra,
+            self.mitre,
         )
     }
 }
@@ -90,6 +92,7 @@ pub fn render_network(
                         destination: dst,
                         hostname: destination_hostname.clone().unwrap_or_default(),
                         extra: String::new(),
+                        mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                     })
                 }
                 EventDetail::DnsQuery { query_name, query_status, query_results } => {
@@ -101,6 +104,7 @@ pub fn render_network(
                         destination: query_results.clone().unwrap_or_default(),
                         hostname: query_name.clone().unwrap_or_default(),
                         extra: query_status.clone().unwrap_or_default(),
+                        mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                     })
                 }
                 _ => None,
@@ -130,12 +134,13 @@ pub fn render_network(
         3 => rows.sort_by(|a, b| cmp_ord(a.source.cmp(&b.source), sort_asc)),
         4 => rows.sort_by(|a, b| cmp_ord(a.destination.cmp(&b.destination), sort_asc)),
         5 => rows.sort_by(|a, b| cmp_ord(a.hostname.cmp(&b.hostname), sort_asc)),
+        6 => rows.sort_by(|a, b| cmp_ord(a.mitre.cmp(&b.mitre), sort_asc)),
         _ => {}
     }
 
     let selected = tab.selected_row;
     let headers = make_headers(
-        &["Time", "Direction", "Protocol", "Source", "Destination", "Hostname"],
+        &["Time", "Direction", "Protocol", "Source", "Destination", "Hostname", "MITRE"],
         &tab.sort,
     );
 
@@ -153,7 +158,8 @@ pub fn render_network(
             .column(Column::initial(70.0).clip(true))   // Protocol
             .column(Column::initial(160.0).clip(true))  // Source
             .column(Column::initial(160.0).clip(true))  // Destination
-            .column(Column::remainder().clip(true).at_least(160.0)) // Hostname
+            .column(Column::initial(160.0).clip(true))  // Hostname
+            .column(Column::remainder().clip(true).at_least(80.0)) // MITRE
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
@@ -174,6 +180,11 @@ pub fn render_network(
                     row.col(|ui| { ui.label(&r.source); });
                     row.col(|ui| { ui.label(&r.destination); });
                     row.col(|ui| { ui.label(&r.hostname); });
+                    row.col(|ui| {
+                        if !r.mitre.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(220, 120, 60), &r.mitre);
+                        }
+                    });
                     let resp = row.response();
                     if resp.clicked() {
                         next_selected = Some(i);
@@ -206,6 +217,10 @@ pub fn render_network(
                         }
                         if ui.button("Copy Hostname").clicked() {
                             ui.ctx().copy_text(r.hostname.clone());
+                            ui.close_menu();
+                        }
+                        if !r.mitre.is_empty() && ui.button("Copy MITRE").clicked() {
+                            ui.ctx().copy_text(r.mitre.clone());
                             ui.close_menu();
                         }
                     });
