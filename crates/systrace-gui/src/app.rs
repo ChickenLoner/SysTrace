@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, TryRecvError};
 use eframe::egui::{self, Ui};
-use systrace_core::{ProcessGuid, SysmonEvent};
+use systrace_core::{EventDetail, ProcessGuid, SysmonEvent};
 
 use crate::panels;
-use crate::state::{AppState, FileMetadata, HelpTab, TelemetryTab, TreeEventFilter};
+use crate::state::{AppState, FileMetadata, HelpTab, SpecialFilter, TelemetryTab};
 
 /// Maximum event batches processed per UI frame to keep the frame time bounded.
 const MAX_BATCHES_PER_FRAME: usize = 20;
@@ -251,6 +251,68 @@ impl SysTraceApp {
             .filter_map(|ev| ev.mitre_technique.as_ref().map(|m| m.id.clone()))
             .collect();
         self.state.mitre_filter.clear();
+
+        // ── Precompute for SpecialFilter ──────────────────────────────────────
+
+        // Network processes: have at least one EventId 3 (NetworkConnect) or 22 (DnsQuery).
+        let mut network_processes = std::collections::HashSet::new();
+        for &eid in &[3u16, 22] {
+            for &idx in self.state.event_store.events_for_type(eid) {
+                if let Some(guid) = self.state.event_store.events[idx].process_guid {
+                    network_processes.insert(guid);
+                }
+            }
+        }
+        self.state.network_processes = network_processes;
+
+        // Persistence processes: registry events (12-14) touching known paths,
+        // or process image_name is schtasks.exe / at.exe.
+        const PERSIST_PATTERNS: &[&str] = &[
+            r"\currentversion\run\",
+            r"\currentversion\runonce\",
+            r"\currentcontrolset\services\",
+            r"\schedule\taskcache\",
+            r"\microsoft\wbem\",
+            r"\currentversion\winlogon\",
+            r"\currentversion\windows\appinitdlls",
+            r"\currentversion\explorer\shell folders\",
+            r"\startupapproved\",
+        ];
+        let mut persistence_processes = std::collections::HashSet::new();
+        for &eid in &[12u16, 13, 14] {
+            for &idx in self.state.event_store.events_for_type(eid) {
+                let ev = &self.state.event_store.events[idx];
+                if let EventDetail::RegistryEvent { target_object: Some(path), .. } = &ev.detail {
+                    let path_lc = path.to_lowercase();
+                    if PERSIST_PATTERNS.iter().any(|p| path_lc.contains(p)) {
+                        if let Some(guid) = ev.process_guid {
+                            persistence_processes.insert(guid);
+                        }
+                    }
+                }
+            }
+        }
+        for node in self.state.process_tree.nodes.values() {
+            if let Some(ref name) = node.image_name {
+                let lc = name.to_lowercase();
+                if lc == "schtasks.exe" || lc == "at.exe" {
+                    persistence_processes.insert(node.guid);
+                }
+            }
+        }
+        self.state.persistence_processes = persistence_processes;
+
+        // Available users from process nodes (sorted).
+        let mut user_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for node in self.state.process_tree.nodes.values() {
+            if let Some(ref user) = node.user {
+                user_set.insert(user.clone());
+            }
+        }
+        self.state.available_users = user_set.into_iter().collect();
+
+        // Reset the filter UI state.
+        self.state.special_filter = SpecialFilter::default();
     }
 
 
@@ -375,13 +437,50 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn node_passes_event_filter(&self, guid: &ProcessGuid) -> bool {
-        let f = &self.state.tree_event_filter;
+        let sf = &self.state.special_filter;
         let mitre_active = !self.state.mitre_filter.is_empty();
-        if !f.any_active() && !mitre_active {
+
+        if !sf.any_active() && !mitre_active {
             return true;
         }
 
-        // MITRE filter: process must have at least one event matching a checked technique.
+        // Look up the node for integrity / user checks.
+        let node = match self.state.process_tree.get(guid) {
+            Some(n) => n,
+            None => return true, // synthetic/unknown — don't hide
+        };
+
+        // ── Integrity Level (AND) ────────────────────────────────────────────
+        if sf.any_integrity_active() {
+            let il = node.integrity_level.as_deref().unwrap_or("").to_lowercase();
+            let passes = (sf.integrity_system && il == "system")
+                || (sf.integrity_high   && il == "high")
+                || (sf.integrity_medium && il == "medium")
+                || (sf.integrity_low    && il == "low");
+            if !passes {
+                return false;
+            }
+        }
+
+        // ── User (AND) ───────────────────────────────────────────────────────
+        if !sf.users_checked.is_empty() {
+            let user = node.user.as_deref().unwrap_or("");
+            if !sf.users_checked.contains(user) {
+                return false;
+            }
+        }
+
+        // ── Network Activity (AND) ───────────────────────────────────────────
+        if sf.network && !self.state.network_processes.contains(guid) {
+            return false;
+        }
+
+        // ── Persistence Activity (AND) ───────────────────────────────────────
+        if sf.persistence && !self.state.persistence_processes.contains(guid) {
+            return false;
+        }
+
+        // ── MITRE Techniques (AND) ───────────────────────────────────────────
         if mitre_active {
             let has_match = self
                 .state
@@ -398,72 +497,9 @@ impl SysTraceApp {
             if !has_match {
                 return false;
             }
-            // If only MITRE filter is active (no event type filters), return true here.
-            if !f.any_active() {
-                return true;
-            }
         }
 
-        if f.network
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[3, 22])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.files
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[11, 15, 23, 26, 27, 28, 29])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.registry
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[12, 13, 14])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.pipes
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[17, 18])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.injection
-            && (!self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[8, 10, 25])
-                .is_empty()
-                || !self
-                    .state
-                    .event_store
-                    .events_targeting_process(guid)
-                    .is_empty())
-        {
-            return true;
-        }
-        if f.drivers
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[6, 7])
-                .is_empty()
-        {
-            return true;
-        }
-        false
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -695,6 +731,10 @@ impl SysTraceApp {
                 }
             });
 
+            if ui.button("Stats").clicked() {
+                self.state.show_stats = !self.state.show_stats;
+            }
+
             if ui.button("Help").clicked() {
                 self.state.show_help = !self.state.show_help;
             }
@@ -833,26 +873,65 @@ impl SysTraceApp {
                 }
             });
         } else {
-            // Normal mode: event type filter checkboxes
-            egui::CollapsingHeader::new("Event Type Filter")
+            // Normal mode: forensic-focused SpecialFilter UI
+
+            // ── Integrity Level ───────────────────────────────────────────
+            egui::CollapsingHeader::new("Integrity Level")
                 .default_open(false)
                 .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut self.state.tree_event_filter.network, "Network");
-                        ui.checkbox(&mut self.state.tree_event_filter.files, "Files");
-                        ui.checkbox(&mut self.state.tree_event_filter.registry, "Registry");
-                        ui.checkbox(&mut self.state.tree_event_filter.pipes, "Pipes");
-                        ui.checkbox(&mut self.state.tree_event_filter.injection, "Injection");
-                        ui.checkbox(&mut self.state.tree_event_filter.drivers, "Drivers");
-                    });
-                    if self.state.tree_event_filter.any_active()
-                        && ui.small_button("Clear All").clicked()
+                    ui.checkbox(&mut self.state.special_filter.integrity_system, "System");
+                    ui.checkbox(&mut self.state.special_filter.integrity_high,   "High");
+                    ui.checkbox(&mut self.state.special_filter.integrity_medium, "Medium");
+                    ui.checkbox(&mut self.state.special_filter.integrity_low,    "Low");
+                    if self.state.special_filter.any_integrity_active()
+                        && ui.small_button("Clear").clicked()
                     {
-                        self.state.tree_event_filter = TreeEventFilter::default();
+                        self.state.special_filter.integrity_system = false;
+                        self.state.special_filter.integrity_high   = false;
+                        self.state.special_filter.integrity_medium = false;
+                        self.state.special_filter.integrity_low    = false;
                     }
                 });
 
-            // MITRE Techniques filter (only shown when file is loaded with MITRE data)
+            // ── User ──────────────────────────────────────────────────────
+            if !self.state.available_users.is_empty() {
+                let users: Vec<String> = self.state.available_users.clone();
+                egui::CollapsingHeader::new("User")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for user in &users {
+                            let mut checked = self.state.special_filter.users_checked.contains(user);
+                            if ui.checkbox(&mut checked, user.as_str()).changed() {
+                                if checked {
+                                    self.state.special_filter.users_checked.insert(user.clone());
+                                } else {
+                                    self.state.special_filter.users_checked.remove(user);
+                                }
+                            }
+                        }
+                        if !self.state.special_filter.users_checked.is_empty()
+                            && ui.small_button("Clear").clicked()
+                        {
+                            self.state.special_filter.users_checked.clear();
+                        }
+                    });
+            }
+
+            // ── Activity ──────────────────────────────────────────────────
+            egui::CollapsingHeader::new("Activity")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut self.state.special_filter.network,     "Network Connection");
+                    ui.checkbox(&mut self.state.special_filter.persistence, "Persistence Activity");
+                    if (self.state.special_filter.network || self.state.special_filter.persistence)
+                        && ui.small_button("Clear").clicked()
+                    {
+                        self.state.special_filter.network     = false;
+                        self.state.special_filter.persistence = false;
+                    }
+                });
+
+            // ── MITRE Techniques ──────────────────────────────────────────
             if !self.state.available_mitre.is_empty() {
                 let mitre_ids: Vec<String> = self.state.available_mitre.iter().cloned().collect();
                 egui::CollapsingHeader::new("MITRE Techniques")
@@ -874,6 +953,14 @@ impl SysTraceApp {
                             self.state.mitre_filter.clear();
                         }
                     });
+            }
+
+            // Clear all filters button
+            if self.state.special_filter.any_active() || !self.state.mitre_filter.is_empty() {
+                if ui.small_button("Clear All Filters").clicked() {
+                    self.state.special_filter = SpecialFilter::default();
+                    self.state.mitre_filter.clear();
+                }
             }
         }
 
@@ -1590,6 +1677,268 @@ impl SysTraceApp {
             });
     }
     // -----------------------------------------------------------------------
+    // Stats popup
+    // -----------------------------------------------------------------------
+
+    fn render_stats_window(&mut self, ctx: &egui::Context) {
+        use crate::panels::event_label;
+
+        let mut open = self.state.show_stats;
+
+        egui::Window::new("Statistics")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(540.0)
+            .default_height(500.0)
+            .show(ctx, |ui| {
+                let rodeo = self.state.rodeo.clone();
+
+                // ── Determine host filter ─────────────────────────────────
+                let host_filter = self.state.selected_host.as_deref();
+
+                // ── Collect filtered events ───────────────────────────────
+                let total_events = self.state.event_store.len();
+                let filtered_events: Vec<&systrace_core::SysmonEvent> = self
+                    .state
+                    .event_store
+                    .events
+                    .iter()
+                    .filter(|ev| {
+                        if let Some(host) = host_filter {
+                            rodeo.resolve(&ev.computer) == host
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                let filtered_count = filtered_events.len();
+
+                // ── Time range ────────────────────────────────────────────
+                let time_range = if filtered_events.is_empty() {
+                    None
+                } else {
+                    let min_t = filtered_events.iter().map(|e| e.time_created).min();
+                    let max_t = filtered_events.iter().map(|e| e.time_created).max();
+                    min_t.zip(max_t)
+                };
+
+                // ── Per-EventID counts ────────────────────────────────────
+                let mut event_id_counts: std::collections::BTreeMap<u16, usize> =
+                    std::collections::BTreeMap::new();
+                for ev in &filtered_events {
+                    *event_id_counts.entry(ev.event_id).or_insert(0) += 1;
+                }
+
+                // ── Per-computer counts ───────────────────────────────────
+                let mut host_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for ev in &filtered_events {
+                    let computer = rodeo.resolve(&ev.computer).to_owned();
+                    *host_counts.entry(computer).or_insert(0) += 1;
+                }
+
+                // ── Process-level stats (nodes matching host filter) ──────
+                let mut user_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                let mut integrity_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for node in self.state.process_tree.nodes.values() {
+                    if let Some(host) = host_filter {
+                        if node.computer != host {
+                            continue;
+                        }
+                    }
+                    let user = node.user.as_deref().unwrap_or("(unknown)").to_owned();
+                    *user_counts.entry(user).or_insert(0) += 1;
+                    let il = node.integrity_level.as_deref().unwrap_or("(unknown)").to_owned();
+                    *integrity_counts.entry(il).or_insert(0) += 1;
+                }
+
+                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    // ── Summary ───────────────────────────────────────────
+                    ui.strong("Summary");
+                    ui.add_space(4.0);
+                    egui::Grid::new("stats_summary")
+                        .num_columns(2)
+                        .striped(true)
+                        .min_col_width(160.0)
+                        .show(ui, |ui| {
+                            ui.label("Total events");
+                            if host_filter.is_some() {
+                                ui.label(format!("{filtered_count} / {total_events}"));
+                            } else {
+                                ui.label(format!("{total_events}"));
+                            }
+                            ui.end_row();
+
+                            ui.label("Processes (tree nodes)");
+                            let proc_count = if host_filter.is_some() {
+                                user_counts.values().sum::<usize>()
+                            } else {
+                                self.state.process_tree.nodes.len()
+                            };
+                            ui.label(format!("{proc_count}"));
+                            ui.end_row();
+
+                            ui.label("Host filter");
+                            ui.label(host_filter.unwrap_or("All hosts"));
+                            ui.end_row();
+
+                            if let Some((t_min, t_max)) = time_range {
+                                ui.label("First event");
+                                ui.label(t_min.format("%Y-%m-%d %H:%M:%S UTC").to_string());
+                                ui.end_row();
+                                ui.label("Last event");
+                                ui.label(t_max.format("%Y-%m-%d %H:%M:%S UTC").to_string());
+                                ui.end_row();
+                                let duration = t_max - t_min;
+                                let total_secs = duration.num_seconds().abs();
+                                let h = total_secs / 3600;
+                                let m = (total_secs % 3600) / 60;
+                                let s = total_secs % 60;
+                                ui.label("Duration");
+                                ui.label(format!("{h}h {m}m {s}s"));
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.add_space(10.0);
+
+                    // ── Per-EventID breakdown ─────────────────────────────
+                    ui.strong("Event Type Breakdown");
+                    ui.add_space(4.0);
+                    egui::Grid::new("stats_event_ids")
+                        .num_columns(4)
+                        .striped(true)
+                        .min_col_width(60.0)
+                        .show(ui, |ui| {
+                            ui.strong("EventID");
+                            ui.strong("Name");
+                            ui.strong("Count");
+                            ui.strong("%");
+                            ui.end_row();
+
+                            for (eid, count) in &event_id_counts {
+                                ui.label(eid.to_string());
+                                ui.label(event_label(*eid));
+                                ui.label(count.to_string());
+                                let pct = if filtered_count > 0 {
+                                    (*count as f64 / filtered_count as f64) * 100.0
+                                } else {
+                                    0.0
+                                };
+                                ui.label(format!("{pct:.1}%"));
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.add_space(10.0);
+
+                    // ── Integrity distribution ────────────────────────────
+                    ui.strong("Integrity Level Distribution (Processes)");
+                    ui.add_space(4.0);
+                    if integrity_counts.is_empty() {
+                        ui.label("No process data loaded.");
+                    } else {
+                        let total_procs: usize = integrity_counts.values().sum();
+                        egui::Grid::new("stats_integrity")
+                            .num_columns(3)
+                            .striped(true)
+                            .min_col_width(100.0)
+                            .show(ui, |ui| {
+                                ui.strong("Integrity Level");
+                                ui.strong("Count");
+                                ui.strong("%");
+                                ui.end_row();
+
+                                for (il, count) in &integrity_counts {
+                                    ui.label(il.as_str());
+                                    ui.label(count.to_string());
+                                    let pct = if total_procs > 0 {
+                                        (*count as f64 / total_procs as f64) * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    ui.label(format!("{pct:.1}%"));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+
+                    ui.add_space(10.0);
+
+                    // ── Per-user process count ────────────────────────────
+                    ui.strong("Processes per User");
+                    ui.add_space(4.0);
+                    if user_counts.is_empty() {
+                        ui.label("No process data loaded.");
+                    } else {
+                        let total_procs: usize = user_counts.values().sum();
+                        egui::Grid::new("stats_users")
+                            .num_columns(3)
+                            .striped(true)
+                            .min_col_width(160.0)
+                            .show(ui, |ui| {
+                                ui.strong("User");
+                                ui.strong("Processes");
+                                ui.strong("%");
+                                ui.end_row();
+
+                                // Sort by count descending
+                                let mut user_vec: Vec<(&String, &usize)> = user_counts.iter().collect();
+                                user_vec.sort_by(|a, b| b.1.cmp(a.1));
+                                for (user, count) in user_vec {
+                                    ui.label(user.as_str());
+                                    ui.label(count.to_string());
+                                    let pct = if total_procs > 0 {
+                                        (*count as f64 / total_procs as f64) * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    ui.label(format!("{pct:.1}%"));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+
+                    ui.add_space(10.0);
+
+                    // ── Host breakdown ────────────────────────────────────
+                    if host_counts.len() > 1 {
+                        ui.strong("Host / Computer Breakdown");
+                        ui.add_space(4.0);
+                        egui::Grid::new("stats_hosts")
+                            .num_columns(3)
+                            .striped(true)
+                            .min_col_width(160.0)
+                            .show(ui, |ui| {
+                                ui.strong("Computer");
+                                ui.strong("Events");
+                                ui.strong("%");
+                                ui.end_row();
+
+                                let mut host_vec: Vec<(&String, &usize)> = host_counts.iter().collect();
+                                host_vec.sort_by(|a, b| b.1.cmp(a.1));
+                                for (computer, count) in host_vec {
+                                    ui.label(computer.as_str());
+                                    ui.label(count.to_string());
+                                    let pct = if total_events > 0 {
+                                        (*count as f64 / total_events as f64) * 100.0
+                                    } else {
+                                        0.0
+                                    };
+                                    ui.label(format!("{pct:.1}%"));
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+            });
+
+        self.state.show_stats = open;
+    }
+
+    // -----------------------------------------------------------------------
     // Help window
     // -----------------------------------------------------------------------
 
@@ -1796,6 +2145,11 @@ impl eframe::App for SysTraceApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             self.render_menu(ui, ctx);
         });
+
+        // Stats popup (floating)
+        if self.state.show_stats {
+            self.render_stats_window(ctx);
+        }
 
         // Help window (floating)
         if self.state.show_help {

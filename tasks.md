@@ -80,7 +80,7 @@ No help system exists. Add "Help" menu button next to "File" → tabbed floating
 ---
 
 ## Task 6: Stats Popup (Filter-Aware)
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 Add "Stats" button in menu bar → floating popup with statistics that update based on current filters.
 
@@ -97,17 +97,17 @@ Add "Stats" button in menu bar → floating popup with statistics that update ba
 - `crates/systrace-gui/src/app.rs` — add Stats button in `render_menu()`, implement `render_stats_window()`
 
 **Steps:**
-- [ ] Add state field
-- [ ] Add "Stats" button to menu bar
-- [ ] Implement `render_stats_window()` as `egui::Window`
-- [ ] Compute stats from EventStore, respect host filter + special filter
-- [ ] Display as formatted grid with counts and percentages
-- [ ] Reuse `event_label()` from `panels/mod.rs` for event type names
+- [x] Add state field
+- [x] Add "Stats" button to menu bar
+- [x] Implement `render_stats_window()` as `egui::Window`
+- [x] Compute stats from EventStore, respect host filter + special filter
+- [x] Display as formatted grid with counts and percentages
+- [x] Reuse `event_label()` from `panels/mod.rs` for event type names
 
 ---
 
 ## Task 7: Replace Event Type Filter with Special Filter
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 Remove current `TreeEventFilter` (6 event type checkboxes). Replace with forensic-focused filters.
 
@@ -139,12 +139,12 @@ Remove current `TreeEventFilter` (6 event type checkboxes). Replace with forensi
 - `crates/systrace-gui/src/app.rs` — replace filter UI (~line 935-953), rewrite `node_passes_event_filter()` (~line 367-432), populate precomputed sets on file load
 
 **Steps:**
-- [ ] Define `SpecialFilter` struct in state.rs
-- [ ] Add precomputed `HashSet<ProcessGuid>` for network/persistence processes
-- [ ] Populate sets + user list on file load completion
-- [ ] Replace filter UI rendering with 4 collapsing sections
-- [ ] Rewrite `node_passes_event_filter()` with new logic
-- [ ] Remove old `TreeEventFilter`
+- [x] Define `SpecialFilter` struct in state.rs
+- [x] Add precomputed `HashSet<ProcessGuid>` for network/persistence processes
+- [x] Populate sets + user list on file load completion
+- [x] Replace filter UI rendering with 4 collapsing sections
+- [x] Rewrite `node_passes_event_filter()` with new logic
+- [x] Remove old `TreeEventFilter`
 
 ---
 
