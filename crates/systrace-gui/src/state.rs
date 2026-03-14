@@ -26,6 +26,15 @@ impl TreeEventFilter {
     }
 }
 
+/// Which tab is active in the Help window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HelpTab {
+    #[default]
+    ColorGuide,
+    KeyboardShortcuts,
+    FeatureGuide,
+}
+
 /// Which telemetry tab is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TelemetryTab {
@@ -83,6 +92,10 @@ pub struct AppState {
     pub available_mitre: BTreeSet<String>,
     /// MITRE technique IDs whose checkboxes are active (filter: show processes with these techniques).
     pub mitre_filter: HashSet<String>,
+    /// Whether the Help window is open.
+    pub show_help: bool,
+    /// Active tab inside the Help window.
+    pub help_tab: HelpTab,
     /// Pre-order visible node list for keyboard navigation (rebuilt each frame).
     pub flat_visible: Vec<ProcessGuid>,
     /// When true, the next render of the selected node calls scroll_to_me().
@@ -136,6 +149,8 @@ impl Default for AppState {
             tree_event_filter: TreeEventFilter::default(),
             available_mitre: BTreeSet::new(),
             mitre_filter: HashSet::new(),
+            show_help: false,
+            help_tab: HelpTab::default(),
             flat_visible: Vec::new(),
             scroll_to_selected: false,
             rodeo: systrace_core::new_rodeo(),
