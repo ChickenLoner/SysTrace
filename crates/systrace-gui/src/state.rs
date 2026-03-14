@@ -7,22 +7,33 @@ use crate::panels::TabState;
 
 pub use systrace_core::SharedRodeo;
 
-/// Event category filter for the process tree.
-/// When any field is true, only processes with matching events are shown.
+/// Forensic-focused process tree filter.
+/// AND logic: a process must pass every active category to be shown.
 #[derive(Debug, Clone, Default)]
-pub struct TreeEventFilter {
-    pub network: bool,
-    pub files: bool,
-    pub registry: bool,
-    pub pipes: bool,
-    pub injection: bool,
-    pub drivers: bool,
+pub struct SpecialFilter {
+    // Integrity level — show only processes matching checked levels.
+    pub integrity_system: bool,
+    pub integrity_high:   bool,
+    pub integrity_medium: bool,
+    pub integrity_low:    bool,
+    // User — show only processes whose user is in this set (empty = no filter).
+    pub users_checked: HashSet<String>,
+    // Activity shortcuts (precomputed on file load).
+    pub network:     bool,  // process has NetworkConnect / DnsQuery events
+    pub persistence: bool,  // process touches persistence locations
 }
 
-impl TreeEventFilter {
+impl SpecialFilter {
     pub fn any_active(&self) -> bool {
-        self.network || self.files || self.registry
-            || self.pipes || self.injection || self.drivers
+        self.any_integrity_active()
+            || !self.users_checked.is_empty()
+            || self.network
+            || self.persistence
+    }
+
+    pub fn any_integrity_active(&self) -> bool {
+        self.integrity_system || self.integrity_high
+            || self.integrity_medium || self.integrity_low
     }
 }
 
@@ -86,8 +97,14 @@ pub struct AppState {
     pub tab_detection: TabState,
     /// Global text filter applied to all telemetry table panels simultaneously.
     pub telemetry_filter: String,
-    /// Event category checkboxes for narrowing the process tree.
-    pub tree_event_filter: TreeEventFilter,
+    /// Forensic-focused process tree filter (replaces old TreeEventFilter).
+    pub special_filter: SpecialFilter,
+    /// Unique users discovered from loaded ProcessNode records (for User filter UI).
+    pub available_users: Vec<String>,
+    /// Processes that have at least one NetworkConnect (3) or DnsQuery (22) event.
+    pub network_processes: HashSet<ProcessGuid>,
+    /// Processes touching persistence-related registry keys or known scheduler images.
+    pub persistence_processes: HashSet<ProcessGuid>,
     /// MITRE technique IDs available in the loaded file.
     pub available_mitre: BTreeSet<String>,
     /// MITRE technique IDs whose checkboxes are active (filter: show processes with these techniques).
@@ -148,7 +165,10 @@ impl Default for AppState {
             tab_drivers: TabState::default(),
             tab_detection: TabState::default(),
             telemetry_filter: String::new(),
-            tree_event_filter: TreeEventFilter::default(),
+            special_filter: SpecialFilter::default(),
+            available_users: Vec::new(),
+            network_processes: HashSet::new(),
+            persistence_processes: HashSet::new(),
             available_mitre: BTreeSet::new(),
             mitre_filter: HashSet::new(),
             show_stats: false,

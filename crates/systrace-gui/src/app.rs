@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, TryRecvError};
 use eframe::egui::{self, Ui};
-use systrace_core::{ProcessGuid, SysmonEvent};
+use systrace_core::{EventDetail, ProcessGuid, SysmonEvent};
 
 use crate::panels;
-use crate::state::{AppState, FileMetadata, HelpTab, TelemetryTab, TreeEventFilter};
+use crate::state::{AppState, FileMetadata, HelpTab, SpecialFilter, TelemetryTab};
 
 /// Maximum event batches processed per UI frame to keep the frame time bounded.
 const MAX_BATCHES_PER_FRAME: usize = 20;
@@ -251,6 +251,68 @@ impl SysTraceApp {
             .filter_map(|ev| ev.mitre_technique.as_ref().map(|m| m.id.clone()))
             .collect();
         self.state.mitre_filter.clear();
+
+        // ── Precompute for SpecialFilter ──────────────────────────────────────
+
+        // Network processes: have at least one EventId 3 (NetworkConnect) or 22 (DnsQuery).
+        let mut network_processes = std::collections::HashSet::new();
+        for &eid in &[3u16, 22] {
+            for &idx in self.state.event_store.events_for_type(eid) {
+                if let Some(guid) = self.state.event_store.events[idx].process_guid {
+                    network_processes.insert(guid);
+                }
+            }
+        }
+        self.state.network_processes = network_processes;
+
+        // Persistence processes: registry events (12-14) touching known paths,
+        // or process image_name is schtasks.exe / at.exe.
+        const PERSIST_PATTERNS: &[&str] = &[
+            r"\currentversion\run\",
+            r"\currentversion\runonce\",
+            r"\currentcontrolset\services\",
+            r"\schedule\taskcache\",
+            r"\microsoft\wbem\",
+            r"\currentversion\winlogon\",
+            r"\currentversion\windows\appinitdlls",
+            r"\currentversion\explorer\shell folders\",
+            r"\startupapproved\",
+        ];
+        let mut persistence_processes = std::collections::HashSet::new();
+        for &eid in &[12u16, 13, 14] {
+            for &idx in self.state.event_store.events_for_type(eid) {
+                let ev = &self.state.event_store.events[idx];
+                if let EventDetail::RegistryEvent { target_object: Some(path), .. } = &ev.detail {
+                    let path_lc = path.to_lowercase();
+                    if PERSIST_PATTERNS.iter().any(|p| path_lc.contains(p)) {
+                        if let Some(guid) = ev.process_guid {
+                            persistence_processes.insert(guid);
+                        }
+                    }
+                }
+            }
+        }
+        for node in self.state.process_tree.nodes.values() {
+            if let Some(ref name) = node.image_name {
+                let lc = name.to_lowercase();
+                if lc == "schtasks.exe" || lc == "at.exe" {
+                    persistence_processes.insert(node.guid);
+                }
+            }
+        }
+        self.state.persistence_processes = persistence_processes;
+
+        // Available users from process nodes (sorted).
+        let mut user_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for node in self.state.process_tree.nodes.values() {
+            if let Some(ref user) = node.user {
+                user_set.insert(user.clone());
+            }
+        }
+        self.state.available_users = user_set.into_iter().collect();
+
+        // Reset the filter UI state.
+        self.state.special_filter = SpecialFilter::default();
     }
 
 
@@ -375,13 +437,50 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn node_passes_event_filter(&self, guid: &ProcessGuid) -> bool {
-        let f = &self.state.tree_event_filter;
+        let sf = &self.state.special_filter;
         let mitre_active = !self.state.mitre_filter.is_empty();
-        if !f.any_active() && !mitre_active {
+
+        if !sf.any_active() && !mitre_active {
             return true;
         }
 
-        // MITRE filter: process must have at least one event matching a checked technique.
+        // Look up the node for integrity / user checks.
+        let node = match self.state.process_tree.get(guid) {
+            Some(n) => n,
+            None => return true, // synthetic/unknown — don't hide
+        };
+
+        // ── Integrity Level (AND) ────────────────────────────────────────────
+        if sf.any_integrity_active() {
+            let il = node.integrity_level.as_deref().unwrap_or("").to_lowercase();
+            let passes = (sf.integrity_system && il == "system")
+                || (sf.integrity_high   && il == "high")
+                || (sf.integrity_medium && il == "medium")
+                || (sf.integrity_low    && il == "low");
+            if !passes {
+                return false;
+            }
+        }
+
+        // ── User (AND) ───────────────────────────────────────────────────────
+        if !sf.users_checked.is_empty() {
+            let user = node.user.as_deref().unwrap_or("");
+            if !sf.users_checked.contains(user) {
+                return false;
+            }
+        }
+
+        // ── Network Activity (AND) ───────────────────────────────────────────
+        if sf.network && !self.state.network_processes.contains(guid) {
+            return false;
+        }
+
+        // ── Persistence Activity (AND) ───────────────────────────────────────
+        if sf.persistence && !self.state.persistence_processes.contains(guid) {
+            return false;
+        }
+
+        // ── MITRE Techniques (AND) ───────────────────────────────────────────
         if mitre_active {
             let has_match = self
                 .state
@@ -398,72 +497,9 @@ impl SysTraceApp {
             if !has_match {
                 return false;
             }
-            // If only MITRE filter is active (no event type filters), return true here.
-            if !f.any_active() {
-                return true;
-            }
         }
 
-        if f.network
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[3, 22])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.files
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[11, 15, 23, 26, 27, 28, 29])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.registry
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[12, 13, 14])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.pipes
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[17, 18])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.injection
-            && (!self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[8, 10, 25])
-                .is_empty()
-                || !self
-                    .state
-                    .event_store
-                    .events_targeting_process(guid)
-                    .is_empty())
-        {
-            return true;
-        }
-        if f.drivers
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[6, 7])
-                .is_empty()
-        {
-            return true;
-        }
-        false
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -837,26 +873,65 @@ impl SysTraceApp {
                 }
             });
         } else {
-            // Normal mode: event type filter checkboxes
-            egui::CollapsingHeader::new("Event Type Filter")
+            // Normal mode: forensic-focused SpecialFilter UI
+
+            // ── Integrity Level ───────────────────────────────────────────
+            egui::CollapsingHeader::new("Integrity Level")
                 .default_open(false)
                 .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut self.state.tree_event_filter.network, "Network");
-                        ui.checkbox(&mut self.state.tree_event_filter.files, "Files");
-                        ui.checkbox(&mut self.state.tree_event_filter.registry, "Registry");
-                        ui.checkbox(&mut self.state.tree_event_filter.pipes, "Pipes");
-                        ui.checkbox(&mut self.state.tree_event_filter.injection, "Injection");
-                        ui.checkbox(&mut self.state.tree_event_filter.drivers, "Drivers");
-                    });
-                    if self.state.tree_event_filter.any_active()
-                        && ui.small_button("Clear All").clicked()
+                    ui.checkbox(&mut self.state.special_filter.integrity_system, "System");
+                    ui.checkbox(&mut self.state.special_filter.integrity_high,   "High");
+                    ui.checkbox(&mut self.state.special_filter.integrity_medium, "Medium");
+                    ui.checkbox(&mut self.state.special_filter.integrity_low,    "Low");
+                    if self.state.special_filter.any_integrity_active()
+                        && ui.small_button("Clear").clicked()
                     {
-                        self.state.tree_event_filter = TreeEventFilter::default();
+                        self.state.special_filter.integrity_system = false;
+                        self.state.special_filter.integrity_high   = false;
+                        self.state.special_filter.integrity_medium = false;
+                        self.state.special_filter.integrity_low    = false;
                     }
                 });
 
-            // MITRE Techniques filter (only shown when file is loaded with MITRE data)
+            // ── User ──────────────────────────────────────────────────────
+            if !self.state.available_users.is_empty() {
+                let users: Vec<String> = self.state.available_users.clone();
+                egui::CollapsingHeader::new("User")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for user in &users {
+                            let mut checked = self.state.special_filter.users_checked.contains(user);
+                            if ui.checkbox(&mut checked, user.as_str()).changed() {
+                                if checked {
+                                    self.state.special_filter.users_checked.insert(user.clone());
+                                } else {
+                                    self.state.special_filter.users_checked.remove(user);
+                                }
+                            }
+                        }
+                        if !self.state.special_filter.users_checked.is_empty()
+                            && ui.small_button("Clear").clicked()
+                        {
+                            self.state.special_filter.users_checked.clear();
+                        }
+                    });
+            }
+
+            // ── Activity ──────────────────────────────────────────────────
+            egui::CollapsingHeader::new("Activity")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut self.state.special_filter.network,     "Network Connection");
+                    ui.checkbox(&mut self.state.special_filter.persistence, "Persistence Activity");
+                    if (self.state.special_filter.network || self.state.special_filter.persistence)
+                        && ui.small_button("Clear").clicked()
+                    {
+                        self.state.special_filter.network     = false;
+                        self.state.special_filter.persistence = false;
+                    }
+                });
+
+            // ── MITRE Techniques ──────────────────────────────────────────
             if !self.state.available_mitre.is_empty() {
                 let mitre_ids: Vec<String> = self.state.available_mitre.iter().cloned().collect();
                 egui::CollapsingHeader::new("MITRE Techniques")
@@ -878,6 +953,14 @@ impl SysTraceApp {
                             self.state.mitre_filter.clear();
                         }
                     });
+            }
+
+            // Clear all filters button
+            if self.state.special_filter.any_active() || !self.state.mitre_filter.is_empty() {
+                if ui.small_button("Clear All Filters").clicked() {
+                    self.state.special_filter = SpecialFilter::default();
+                    self.state.mitre_filter.clear();
+                }
             }
         }
 

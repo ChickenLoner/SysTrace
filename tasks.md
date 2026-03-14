@@ -107,7 +107,7 @@ Add "Stats" button in menu bar → floating popup with statistics that update ba
 ---
 
 ## Task 7: Replace Event Type Filter with Special Filter
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 Remove current `TreeEventFilter` (6 event type checkboxes). Replace with forensic-focused filters.
 
@@ -139,12 +139,12 @@ Remove current `TreeEventFilter` (6 event type checkboxes). Replace with forensi
 - `crates/systrace-gui/src/app.rs` — replace filter UI (~line 935-953), rewrite `node_passes_event_filter()` (~line 367-432), populate precomputed sets on file load
 
 **Steps:**
-- [ ] Define `SpecialFilter` struct in state.rs
-- [ ] Add precomputed `HashSet<ProcessGuid>` for network/persistence processes
-- [ ] Populate sets + user list on file load completion
-- [ ] Replace filter UI rendering with 4 collapsing sections
-- [ ] Rewrite `node_passes_event_filter()` with new logic
-- [ ] Remove old `TreeEventFilter`
+- [x] Define `SpecialFilter` struct in state.rs
+- [x] Add precomputed `HashSet<ProcessGuid>` for network/persistence processes
+- [x] Populate sets + user list on file load completion
+- [x] Replace filter UI rendering with 4 collapsing sections
+- [x] Rewrite `node_passes_event_filter()` with new logic
+- [x] Remove old `TreeEventFilter`
 
 ---
 
