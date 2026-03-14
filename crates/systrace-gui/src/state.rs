@@ -95,8 +95,6 @@ pub struct AppState {
     /// Recently opened file paths (most recent first, max 10).
     pub recent_files: Vec<PathBuf>,
     // ── Timeline tab ──────────────────────────────────────────────────────────
-    /// Text filter for the process tree in the Timeline tab.
-    pub timeline_filter: String,
     /// Processes checked/selected for timeline generation.
     pub timeline_checked: HashSet<ProcessGuid>,
     /// Cached sorted event indices (built on "Generate Timeline" click).
@@ -137,7 +135,6 @@ impl Default for AppState {
             dark_mode: true,
             bookmarks: HashMap::new(),
             recent_files: Vec::new(),
-            timeline_filter: String::new(),
             timeline_checked: HashSet::new(),
             timeline_events: Vec::new(),
             timeline_generated: false,

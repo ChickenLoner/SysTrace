@@ -560,226 +560,37 @@ impl SysTraceApp {
             return;
         }
 
-        let available = ui.available_size();
-        let tree_width = (available.x * 0.35).max(250.0).min(450.0);
-
-        ui.horizontal(|ui| {
-            // ── Left: process tree with checkboxes ──────────────────────────
-            ui.allocate_ui(egui::vec2(tree_width, available.y), |ui| {
-                ui.vertical(|ui| {
-                    // Filter bar
-                    ui.horizontal(|ui| {
-                        ui.label("Filter:");
-                        egui::TextEdit::singleline(&mut self.state.timeline_filter)
-                            .hint_text("image, user, cmd, PID\u{2026}")
-                            .desired_width(ui.available_width() - 60.0)
-                            .show(ui);
-                        if !self.state.timeline_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
-                            self.state.timeline_filter.clear();
-                        }
-                    });
-
-                    // Select All / Deselect All
-                    ui.horizontal(|ui| {
-                        if ui.small_button("Select All").clicked() {
-                            let filter_lc = self.state.timeline_filter.to_lowercase();
-                            let guids: Vec<_> = self.state.process_tree.nodes.keys().copied()
-                                .filter(|g| Self::timeline_node_matches(&self.state, g, &filter_lc))
-                                .collect();
-                            self.state.timeline_checked.extend(guids);
-                        }
-                        if ui.small_button("Deselect All").clicked() {
-                            self.state.timeline_checked.clear();
-                            self.state.timeline_generated = false;
-                            self.state.timeline_events.clear();
-                        }
-                    });
-
-                    // Generate Timeline button
-                    let checked_count = self.state.timeline_checked.len();
-                    ui.horizontal(|ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new(format!("Generate Timeline ({checked_count} selected)"))
-                                .color(if checked_count > 0 {
-                                    egui::Color32::from_rgb(80, 200, 100)
-                                } else {
-                                    egui::Color32::GRAY
-                                })
-                        );
-                        if ui.add_enabled(checked_count > 0, btn).clicked() {
-                            let mut indices: Vec<usize> = Vec::new();
-                            for &guid in &self.state.timeline_checked {
-                                indices.extend(self.state.event_store.events_for_process(&guid));
-                            }
-                            indices.sort_unstable();
-                            indices.dedup();
-                            indices.sort_by_key(|&i| self.state.event_store.events[i].time_created);
-                            self.state.timeline_events = indices;
-                            self.state.timeline_generated = true;
-                            self.state.tab_timeline.selected_row = None;
-                            self.state.timeline_event_filter.clear();
-                        }
-                    });
-
-                    ui.separator();
-
-                    // Process tree with checkboxes
-                    let filter_lc = self.state.timeline_filter.to_lowercase();
-                    let roots: Vec<_> = self.state.process_tree.roots().to_vec();
-
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            for root in roots {
-                                self.render_timeline_tree_node(ui, root, &filter_lc);
-                            }
-                        });
-                });
-            });
-
-            ui.separator();
-
-            // ── Right: event table ──────────────────────────────────────────
-            ui.allocate_ui(egui::vec2(ui.available_width(), available.y), |ui| {
-                if !self.state.timeline_generated {
-                    panels::render_empty(ui, "Select processes and click Generate Timeline.");
-                    return;
-                }
-
-                // Event filter bar
-                ui.horizontal(|ui| {
-                    ui.label("Filter events:");
-                    egui::TextEdit::singleline(&mut self.state.timeline_event_filter)
-                        .hint_text("Filter rows\u{2026}")
-                        .desired_width(ui.available_width() - 40.0)
-                        .show(ui);
-                    if !self.state.timeline_event_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
-                        self.state.timeline_event_filter.clear();
-                    }
-                });
-                ui.separator();
-
-                let events = self.state.timeline_events.clone();
-                let filter = self.state.timeline_event_filter.clone();
-                panels::timeline::render_timeline_table(
-                    ui,
-                    &self.state.event_store,
-                    &self.state.process_tree,
-                    &self.state.rodeo,
-                    &events,
-                    &mut self.state.tab_timeline,
-                    &filter,
-                );
-            });
-        });
-    }
-
-    fn render_timeline_tree_node(&mut self, ui: &mut Ui, guid: ProcessGuid, filter_lc: &str) {
-        let node = match self.state.process_tree.get(&guid) {
-            Some(n) => n,
-            None => return,
-        };
-
-        // Snapshot fields
-        let image_name = node.image_name.clone().unwrap_or_else(|| "?".to_owned());
-        let pid_str = node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_owned());
-        let is_synthetic = node.is_synthetic;
-        let is_terminated = node.end_time.is_some();
-        let user_str = node.user.clone().unwrap_or_else(|| "-".to_owned());
-        let children: Vec<_> = node.children.clone();
-
-        // Text filter — check if this subtree matches
-        if !filter_lc.is_empty() && !self.timeline_subtree_matches(guid, filter_lc) {
+        if !self.state.timeline_generated {
+            panels::render_empty(ui, "Select processes in the tree (checkboxes) and click Generate Timeline.");
             return;
         }
 
-        // Color coding
-        let is_injection_target = !self.state.event_store.events_targeting_process(&guid).is_empty();
-        let is_system = user_str.to_uppercase().contains("SYSTEM");
-        let text_color = if is_synthetic {
-            egui::Color32::DARK_GRAY
-        } else if is_injection_target {
-            egui::Color32::from_rgb(220, 60, 60)
-        } else if is_system {
-            egui::Color32::from_rgb(80, 180, 80)
-        } else if is_terminated {
-            egui::Color32::from_rgb(180, 180, 100)
-        } else {
-            ui.visuals().text_color()
-        };
-
-        let label = if is_synthetic {
-            format!("{image_name} ({pid_str}) [synthetic]")
-        } else {
-            format!("{image_name} ({pid_str})")
-        };
-
-        let mut checked = self.state.timeline_checked.contains(&guid);
-        let rich_label = egui::RichText::new(&label).color(text_color);
-
-        if children.is_empty() {
-            // Leaf node — checkbox label IS the clickable text; a separate ui.label
-            // would create a dead zone that looks clickable but doesn't toggle the box.
-            if ui.checkbox(&mut checked, rich_label).changed() {
-                if checked {
-                    self.state.timeline_checked.insert(guid);
-                } else {
-                    self.state.timeline_checked.remove(&guid);
-                }
+        // Event filter bar
+        ui.horizontal(|ui| {
+            ui.label("Filter events:");
+            egui::TextEdit::singleline(&mut self.state.timeline_event_filter)
+                .hint_text("Filter rows\u{2026}")
+                .desired_width(ui.available_width() - 40.0)
+                .show(ui);
+            if !self.state.timeline_event_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
+                self.state.timeline_event_filter.clear();
             }
-        } else {
-            // Parent node with collapsible children
-            let id = egui::Id::new(("timeline_node", guid));
-            let cs = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(), id, false,
-            );
+        });
+        ui.separator();
 
-            cs.show_header(ui, |ui| {
-                // Label is part of the checkbox so the entire row text is clickable.
-                if ui.checkbox(&mut checked, rich_label).changed() {
-                    if checked {
-                        self.state.timeline_checked.insert(guid);
-                    } else {
-                        self.state.timeline_checked.remove(&guid);
-                    }
-                }
-            })
-            .body(|ui| {
-                for child in children {
-                    self.render_timeline_tree_node(ui, child, filter_lc);
-                }
-            });
-        }
+        let events = self.state.timeline_events.clone();
+        let filter = self.state.timeline_event_filter.clone();
+        panels::timeline::render_timeline_table(
+            ui,
+            &self.state.event_store,
+            &self.state.process_tree,
+            &self.state.rodeo,
+            &events,
+            &mut self.state.tab_timeline,
+            &filter,
+        );
     }
 
-    fn timeline_node_matches(state: &crate::state::AppState, guid: &ProcessGuid, filter_lc: &str) -> bool {
-        if filter_lc.is_empty() {
-            return true;
-        }
-        let Some(node) = state.process_tree.get(guid) else { return false; };
-        let image_lc = node.image_name.as_deref().unwrap_or("").to_lowercase();
-        let cmd_lc = node.command_line.as_deref().unwrap_or("").to_lowercase();
-        let user_lc = node.user.as_deref().unwrap_or("").to_lowercase();
-        let pid_str = node.pid.map(|p| p.to_string()).unwrap_or_default();
-        image_lc.contains(filter_lc)
-            || cmd_lc.contains(filter_lc)
-            || user_lc.contains(filter_lc)
-            || pid_str.contains(filter_lc)
-    }
-
-    fn timeline_subtree_matches(&self, guid: ProcessGuid, filter_lc: &str) -> bool {
-        if Self::timeline_node_matches(&self.state, &guid, filter_lc) {
-            return true;
-        }
-        if let Some(node) = self.state.process_tree.get(&guid) {
-            for &child in &node.children {
-                if self.timeline_subtree_matches(child, filter_lc) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
 
 
     // -----------------------------------------------------------------------
@@ -935,24 +746,73 @@ impl SysTraceApp {
             }
         });
 
-        // Event type filter checkboxes
-        egui::CollapsingHeader::new("Event Type Filter")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut self.state.tree_event_filter.network, "Network");
-                    ui.checkbox(&mut self.state.tree_event_filter.files, "Files");
-                    ui.checkbox(&mut self.state.tree_event_filter.registry, "Registry");
-                    ui.checkbox(&mut self.state.tree_event_filter.pipes, "Pipes");
-                    ui.checkbox(&mut self.state.tree_event_filter.injection, "Injection");
-                    ui.checkbox(&mut self.state.tree_event_filter.drivers, "Drivers");
-                });
-                if self.state.tree_event_filter.any_active()
-                    && ui.small_button("Clear All").clicked()
-                {
-                    self.state.tree_event_filter = TreeEventFilter::default();
+        let is_timeline_mode = self.state.active_tab == TelemetryTab::Timeline;
+
+        if is_timeline_mode {
+            // Timeline mode: show selection controls instead of event type filter
+            ui.horizontal(|ui| {
+                if ui.small_button("Select All").clicked() {
+                    let filter_lc = self.state.search_filter.to_lowercase();
+                    let guids: Vec<_> = self.state.process_tree.nodes.keys().copied()
+                        .filter(|g| {
+                            if filter_lc.is_empty() { return true; }
+                            self.subtree_matches_filter(*g, &filter_lc)
+                        })
+                        .collect();
+                    self.state.timeline_checked.extend(guids);
+                }
+                if ui.small_button("Deselect All").clicked() {
+                    self.state.timeline_checked.clear();
+                    self.state.timeline_generated = false;
+                    self.state.timeline_events.clear();
                 }
             });
+
+            // Generate Timeline button
+            let checked_count = self.state.timeline_checked.len();
+            ui.horizontal(|ui| {
+                let btn = egui::Button::new(
+                    egui::RichText::new(format!("Generate Timeline ({checked_count} selected)"))
+                        .color(if checked_count > 0 {
+                            egui::Color32::from_rgb(80, 200, 100)
+                        } else {
+                            egui::Color32::GRAY
+                        })
+                );
+                if ui.add_enabled(checked_count > 0, btn).clicked() {
+                    let mut indices: Vec<usize> = Vec::new();
+                    for &guid in &self.state.timeline_checked {
+                        indices.extend(self.state.event_store.events_for_process(&guid));
+                    }
+                    indices.sort_unstable();
+                    indices.dedup();
+                    indices.sort_by_key(|&i| self.state.event_store.events[i].time_created);
+                    self.state.timeline_events = indices;
+                    self.state.timeline_generated = true;
+                    self.state.tab_timeline.selected_row = None;
+                    self.state.timeline_event_filter.clear();
+                }
+            });
+        } else {
+            // Normal mode: event type filter checkboxes
+            egui::CollapsingHeader::new("Event Type Filter")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut self.state.tree_event_filter.network, "Network");
+                        ui.checkbox(&mut self.state.tree_event_filter.files, "Files");
+                        ui.checkbox(&mut self.state.tree_event_filter.registry, "Registry");
+                        ui.checkbox(&mut self.state.tree_event_filter.pipes, "Pipes");
+                        ui.checkbox(&mut self.state.tree_event_filter.injection, "Injection");
+                        ui.checkbox(&mut self.state.tree_event_filter.drivers, "Drivers");
+                    });
+                    if self.state.tree_event_filter.any_active()
+                        && ui.small_button("Clear All").clicked()
+                    {
+                        self.state.tree_event_filter = TreeEventFilter::default();
+                    }
+                });
+        }
 
         ui.separator();
 
@@ -1130,32 +990,46 @@ impl SysTraceApp {
 
         // --- Render node (leaf vs collapsible) ---
         let do_expand = Cell::new(false);
+        let is_timeline_mode = self.state.active_tab == TelemetryTab::Timeline;
 
         if children.is_empty() {
-            let rich = egui::RichText::new(&label).color(text_color);
-            let resp = ui.selectable_label(is_selected, rich);
-            if resp.clicked() {
-                self.select_process(guid);
-            }
-            if should_scroll {
-                resp.scroll_to_me(Some(egui::Align::Center));
-                self.state.scroll_to_selected = false;
-            }
-            resp.on_hover_ui(|ui| {
-                ui.label(format!("Image: {image_full}"));
-                ui.label(format!("Command: {cmd}"));
-                ui.label(format!("User: {user_str}"));
-                ui.label(format!("Started: {start_str}"));
-            })
-            .context_menu(|ui| {
-                if ui.button("Copy GUID").clicked() {
-                    ui.ctx().copy_text(guid_hex.clone());
-                    ui.close_menu();
+            ui.horizontal(|ui| {
+                // Timeline checkbox (before the label)
+                if is_timeline_mode {
+                    let mut checked = self.state.timeline_checked.contains(&guid);
+                    if ui.checkbox(&mut checked, "").changed() {
+                        if checked {
+                            self.state.timeline_checked.insert(guid);
+                        } else {
+                            self.state.timeline_checked.remove(&guid);
+                        }
+                    }
                 }
-                if ui.button("Copy Command Line").clicked() {
-                    ui.ctx().copy_text(cmd_for_copy.clone());
-                    ui.close_menu();
+                let rich = egui::RichText::new(&label).color(text_color);
+                let resp = ui.selectable_label(is_selected, rich);
+                if resp.clicked() {
+                    self.select_process(guid);
                 }
+                if should_scroll {
+                    resp.scroll_to_me(Some(egui::Align::Center));
+                    self.state.scroll_to_selected = false;
+                }
+                resp.on_hover_ui(|ui| {
+                    ui.label(format!("Image: {image_full}"));
+                    ui.label(format!("Command: {cmd}"));
+                    ui.label(format!("User: {user_str}"));
+                    ui.label(format!("Started: {start_str}"));
+                })
+                .context_menu(|ui| {
+                    if ui.button("Copy GUID").clicked() {
+                        ui.ctx().copy_text(guid_hex.clone());
+                        ui.close_menu();
+                    }
+                    if ui.button("Copy Command Line").clicked() {
+                        ui.ctx().copy_text(cmd_for_copy.clone());
+                        ui.close_menu();
+                    }
+                });
             });
         } else {
             let id = tree_node_id(guid);
@@ -1166,6 +1040,17 @@ impl SysTraceApp {
             );
 
             cs.show_header(ui, |ui| {
+                // Timeline checkbox (before the label)
+                if is_timeline_mode {
+                    let mut checked = self.state.timeline_checked.contains(&guid);
+                    if ui.checkbox(&mut checked, "").changed() {
+                        if checked {
+                            self.state.timeline_checked.insert(guid);
+                        } else {
+                            self.state.timeline_checked.remove(&guid);
+                        }
+                    }
+                }
                 let rich = egui::RichText::new(&label).color(text_color);
                 let resp = ui.selectable_label(is_selected, rich);
                 if resp.clicked() {
