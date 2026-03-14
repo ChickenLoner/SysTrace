@@ -56,7 +56,7 @@ New "Detection" tab shows EventIds 2, 4, 9, 16, 19-21, 24 that were previously i
 ---
 
 ## Task 5: Help Window (Tabbed)
-**Status:** [ ] Not started
+**Status:** [x] Done
 
 No help system exists. Add "Help" menu button next to "File" → tabbed floating window.
 
@@ -70,12 +70,12 @@ No help system exists. Add "Help" menu button next to "File" → tabbed floating
 - `crates/systrace-gui/src/app.rs` — add Help menu in `render_menu()` (~line 788), implement `render_help_window()`
 
 **Steps:**
-- [ ] Add HelpTab enum and state fields
-- [ ] Add "Help" menu button in `render_menu()`
-- [ ] Implement `render_help_window()` with tab bar
-- [ ] Color Guide tab: colored rectangles + labels
-- [ ] Keyboard Shortcuts tab: 2-column table
-- [ ] Feature Guide tab: text sections per panel
+- [x] Add HelpTab enum and state fields
+- [x] Add "Help" menu button in `render_menu()`
+- [x] Implement `render_help_window()` with tab bar
+- [x] Color Guide tab: colored rectangles + labels
+- [x] Keyboard Shortcuts tab: 2-column table
+- [x] Feature Guide tab: text sections per panel
 
 ---
 
