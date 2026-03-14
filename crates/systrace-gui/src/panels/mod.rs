@@ -1,3 +1,4 @@
+pub mod detection;
 pub mod drivers;
 pub mod file_activity;
 pub mod injection;

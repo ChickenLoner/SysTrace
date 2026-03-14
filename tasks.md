@@ -7,69 +7,21 @@
 ## Task 1: Add Missing Process Details Fields
 **Status:** [x] Done
 
-Overview tab missing: FileVersion, Description, Product, Company, OriginalFileName.
-Data IS parsed in `EventDetail::ProcessCreate` (event.rs:162-166) but NOT stored in `ProcessNode`.
-
-**Files:**
-- `crates/systrace-core/src/process_tree.rs` — add 5 `Option<String>` fields to `ProcessNode` (after line 31), extract in `insert_process_create()` in both the promote-synthetic path (~line 93) and new-node path (~line 120)
-- `crates/systrace-gui/src/app.rs` → `render_overview()` (~line 1399) — add 5 rows to details grid before hashes, each with right-click Copy
-
-**Steps:**
-- [x] Add `file_version`, `description`, `product`, `company`, `original_file_name` to `ProcessNode`
-- [x] Extract from `EventDetail::ProcessCreate` pattern match (currently using `..` to skip these)
-- [x] Add rows in Overview tab details grid
-- [x] Add right-click Copy context menu to each new field
+Added `file_version`, `description`, `product`, `company`, `original_file_name` to `ProcessNode`, extracted from `EventDetail::ProcessCreate`, displayed in Overview tab details grid with right-click Copy.
 
 ---
 
 ## Task 2: Fix Timeline Bug
 **Status:** [x] Done
 
-Timeline tab shows nothing after clicking "Generate Timeline".
-
-**Files:**
-- `crates/systrace-gui/src/app.rs` → `render_timeline_tab()` (lines 557-673) + `render_timeline_tree_node()` (line 675)
-- `crates/systrace-gui/src/panels/timeline.rs` → `render_timeline_table()` (line 40)
-
-**Debug points:**
-- `app.rs:609-617` — Generate button collects events via `events_for_process(&guid)` from `timeline_checked: HashSet<ProcessGuid>`
-- `app.rs:675` — verify checkboxes actually toggle `timeline_checked`
-- `panels/timeline.rs:49` — returns early if `event_indices.is_empty()`
-
-**Steps:**
-- [ ] Find out how when generated timeline, a filter box appear on the right at the middle box and the timeline created on the left but we can not see, why can't we put filter on the top of the timeline so there is only 2 box in windows, process tree to select and timeline
-- [ ] Read `render_timeline_tree_node` fully to check checkbox state propagation
-- [ ] Trace data flow: checkbox → `timeline_checked` → Generate click → `events_for_process` → `timeline_events`
-- [ ] Test with `.claude/sysmon.json` sample data
-- [ ] Fix root cause and confirm events populate
+Removed duplicate process tree from Timeline tab (was causing overflow). Checkboxes now appear on the existing left-panel process tree when Timeline tab is active. Select All / Deselect All / Generate Timeline controls moved to left panel header. Timeline tab uses full central panel width for event table only. Removed `render_timeline_tree_node`, `timeline_node_matches`, `timeline_subtree_matches`, and redundant `timeline_filter` state field.
 
 ---
 
 ## Task 3: Detection Tab (Invisible Event Types)
-**Status:** [ ] Not started
+**Status:** [x] Done
 
-EventId 2, 4, 9, 16, 19-21, 24 are parsed into `EventDetail` variants but NO panel displays them. Investigators can't see anti-forensics, WMI persistence, or clipboard activity.
-
-**Categories & columns:**
-- Anti-Forensics: EventId 2 (FileCreateTime) — Time, File, New Time, Old Time
-- Anti-Forensics: EventId 9 (RawAccessRead) — Time, Device
-- Defense Evasion: EventId 4 (SysmonState) — Time, State, Version
-- Defense Evasion: EventId 16 (SysmonConfigChange) — Time, Config, Hash
-- WMI Persistence: EventId 19-21 (WmiActivity) — Time, Type, Operation, User, Namespace, Query, Destination
-- Data Access: EventId 24 (ClipboardChange) — Time, Session, Client, Hashes
-
-**Files:**
-- `crates/systrace-gui/src/panels/detection.rs` — **new file**, follow pattern from `panels/network.rs`
-- `crates/systrace-gui/src/panels/mod.rs` — add `pub mod detection;`
-- `crates/systrace-gui/src/state.rs` — add `Detection` to `TelemetryTab` enum, add `tab_detection: TabState`
-- `crates/systrace-gui/src/app.rs` — add Detection tab button + render call
-
-**Steps:**
-- [ ] Create `detection.rs` with typed row struct and `render_detection_table()`
-- [ ] Use `events_for_process_and_types(guid, &[2, 4, 9, 16, 19, 20, 21, 24])`
-- [ ] Group events with colored section headers per category
-- [ ] Register module, add tab enum variant, add TabState
-- [ ] Add tab button and render call in telemetry panel
+New "Detection" tab shows EventIds 2, 4, 9, 16, 19-21, 24 that were previously invisible. Color-coded by category (Anti-Forensics red, Defense Evasion orange, WMI Persistence purple, Data Access cyan) with legend bar. Sortable columns, global filter bar, right-click copy. Files: `panels/detection.rs` (new), `panels/mod.rs`, `state.rs`, `app.rs`.
 
 ---
 
@@ -224,9 +176,9 @@ Bookmarks (`bookmarks: HashMap<ProcessGuid, String>`) and `recent_files` are los
 
 ## Implementation Order
 
-1. **Task 1** (Process Details) — smallest scope, pure additive
-2. **Task 2** (Timeline fix) — bug fix, isolated
-3. **Task 3** (Detection tab) — new panel, follows existing patterns
+1. **Task 1** (Process Details) — [x] Done
+2. **Task 2** (Timeline fix) — [x] Done
+3. **Task 3** (Detection tab) — [x] Done
 4. **Task 4** (MITRE filter) — column additions + new filter
 5. **Task 5** (Help window) — new UI, standalone
 6. **Task 6** (Stats popup) — new UI, filter integration
