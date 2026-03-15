@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Linux x86_64 ────────────────────────────────────────────────────────────
+  # Ubuntu 22.04 → glibc 2.35. Keeps compatibility with any distro from 2022+
+  # (RHEL 9, Debian 12, Fedora 36+). Avoids glibc 2.38+ from Ubuntu 24.04
+  # which would break on older analyst workstations.
+  build-linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            libglib2.0-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release -p systrace-gui
+
+      - name: Package binary
+        run: |
+          cp target/release/systrace-gui systrace-linux-x86_64
+          chmod +x systrace-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: systrace-linux-x86_64
+          path: systrace-linux-x86_64
+
+  # ── Windows x86_64 ──────────────────────────────────────────────────────────
+  build-windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release -p systrace-gui
+
+      - name: Package binary
+        run: Copy-Item target\release\systrace-gui.exe systrace-windows-x86_64.exe
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: systrace-windows-x86_64
+          path: systrace-windows-x86_64.exe
+
+  # ── macOS Intel (x86_64) ────────────────────────────────────────────────────
+  build-macos-intel:
+    name: macOS (x86_64 Intel)
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release -p systrace-gui
+
+      - name: Package binary
+        run: cp target/release/systrace-gui systrace-macos-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: systrace-macos-x86_64
+          path: systrace-macos-x86_64
+
+  # ── macOS Apple Silicon (aarch64) ───────────────────────────────────────────
+  build-macos-arm:
+    name: macOS (aarch64 Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release -p systrace-gui
+
+      - name: Package binary
+        run: cp target/release/systrace-gui systrace-macos-aarch64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: systrace-macos-aarch64
+          path: systrace-macos-aarch64
+
+  # ── GitHub Release ──────────────────────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: [build-linux, build-windows, build-macos-intel, build-macos-arm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Show artifact tree
+        run: find artifacts -type f
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/systrace-linux-x86_64/systrace-linux-x86_64
+            artifacts/systrace-windows-x86_64/systrace-windows-x86_64.exe
+            artifacts/systrace-macos-x86_64/systrace-macos-x86_64
+            artifacts/systrace-macos-aarch64/systrace-macos-aarch64
