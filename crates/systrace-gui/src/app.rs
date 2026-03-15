@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, TryRecvError};
 use eframe::egui::{self, Ui};
-use systrace_core::{ProcessGuid, SysmonEvent};
+use systrace_core::{EventDetail, ProcessGuid, SysmonEvent};
 
 use crate::panels;
-use crate::state::{AppState, FileMetadata, TelemetryTab, TreeEventFilter};
+use crate::state::{AppState, FileMetadata, HelpTab, SpecialFilter, TelemetryTab};
 
 /// Maximum event batches processed per UI frame to keep the frame time bounded.
 const MAX_BATCHES_PER_FRAME: usize = 20;
@@ -55,8 +55,74 @@ impl Default for SysTraceApp {
     }
 }
 
+/// Draw a horizontal bar chart for stats sections.
+/// A small metric card: coloured big number + muted label below.
+fn stat_card(ui: &mut egui::Ui, value: &str, label: &str, color: egui::Color32) {
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(8, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(value).strong().size(22.0).color(color));
+                ui.label(egui::RichText::new(label).small().color(ui.visuals().weak_text_color()));
+            });
+        });
+}
+
+/// `items`: (label, count, bar_color). `total`: denominator for %.
+fn stats_bar_chart(ui: &mut egui::Ui, items: &[(String, usize, egui::Color32)], total: usize) {
+    if items.is_empty() { return; }
+    let bar_h   = 18.0;
+    let gap     = 2.0;
+    let label_w = 160.0;
+    let count_w = 90.0;
+    let bar_max = 160.0_f32; // fixed width — keeps layout compact
+
+    for (label, count, color) in items {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [label_w, bar_h],
+                egui::Label::new(egui::RichText::new(label).small()).truncate(),
+            );
+            let pct = if total > 0 { *count as f32 / total as f32 } else { 0.0 };
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(bar_max, bar_h - gap * 2.0),
+                egui::Sense::hover(),
+            );
+            let rounding = egui::CornerRadius::same(3);
+            ui.painter().rect_filled(rect, rounding, ui.visuals().faint_bg_color);
+            let fill_w = (pct * bar_max).max(if *count > 0 { 3.0 } else { 0.0 });
+            let fill = egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, rect.height()));
+            ui.painter().rect_filled(fill, rounding, *color);
+            ui.add_sized(
+                [count_w, bar_h],
+                egui::Label::new(
+                    egui::RichText::new(format!("{count}  {:.1}%", pct * 100.0)).small(),
+                ),
+            );
+        });
+    }
+}
+
 impl SysTraceApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Load Windows symbol/emoji fonts as fallbacks so ✕ ⚑ 🔍 🔖 ⚠ render correctly.
+        let mut fonts = egui::FontDefinitions::default();
+        for (name, path) in [
+            ("seguisym",  "C:/Windows/Fonts/seguisym.ttf"),
+            ("seguiemj",  "C:/Windows/Fonts/seguiemj.ttf"),
+        ] {
+            if let Ok(data) = std::fs::read(path) {
+                fonts.font_data.insert(name.to_owned(), egui::FontData::from_owned(data).into());
+                fonts.families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .push(name.to_owned());
+            }
+        }
+        cc.egui_ctx.set_fonts(fonts);
         Self::default()
     }
 
@@ -241,6 +307,79 @@ impl SysTraceApp {
             time_range,
             computer_names,
         });
+
+        // Collect unique MITRE technique IDs across all events.
+        self.state.available_mitre = self
+            .state
+            .event_store
+            .events
+            .iter()
+            .filter_map(|ev| ev.mitre_technique.as_ref().map(|m| m.id.clone()))
+            .collect();
+        self.state.mitre_filter.clear();
+
+        // ── Precompute for SpecialFilter ──────────────────────────────────────
+
+        // Network processes: have at least one EventId 3 (NetworkConnect) or 22 (DnsQuery).
+        let mut network_processes = std::collections::HashSet::new();
+        for &eid in &[3u16, 22] {
+            for &idx in self.state.event_store.events_for_type(eid) {
+                if let Some(guid) = self.state.event_store.events[idx].process_guid {
+                    network_processes.insert(guid);
+                }
+            }
+        }
+        self.state.network_processes = network_processes;
+
+        // Persistence processes: registry events (12-14) touching known paths,
+        // or process image_name is schtasks.exe / at.exe.
+        const PERSIST_PATTERNS: &[&str] = &[
+            r"\currentversion\run\",
+            r"\currentversion\runonce\",
+            r"\currentcontrolset\services\",
+            r"\schedule\taskcache\",
+            r"\microsoft\wbem\",
+            r"\currentversion\winlogon\",
+            r"\currentversion\windows\appinitdlls",
+            r"\currentversion\explorer\shell folders\",
+            r"\startupapproved\",
+        ];
+        let mut persistence_processes = std::collections::HashSet::new();
+        for &eid in &[12u16, 13, 14] {
+            for &idx in self.state.event_store.events_for_type(eid) {
+                let ev = &self.state.event_store.events[idx];
+                if let EventDetail::RegistryEvent { target_object: Some(path), .. } = &ev.detail {
+                    let path_lc = path.to_lowercase();
+                    if PERSIST_PATTERNS.iter().any(|p| path_lc.contains(p)) {
+                        if let Some(guid) = ev.process_guid {
+                            persistence_processes.insert(guid);
+                        }
+                    }
+                }
+            }
+        }
+        for node in self.state.process_tree.nodes.values() {
+            if let Some(ref name) = node.image_name {
+                let lc = name.to_lowercase();
+                if lc == "schtasks.exe" || lc == "at.exe" {
+                    persistence_processes.insert(node.guid);
+                }
+            }
+        }
+        self.state.persistence_processes = persistence_processes;
+
+        // Available users from real (non-synthetic) process nodes (sorted).
+        let mut user_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for node in self.state.process_tree.nodes.values() {
+            if node.is_synthetic { continue; }
+            if let Some(ref user) = node.user {
+                user_set.insert(user.clone());
+            }
+        }
+        self.state.available_users = user_set.into_iter().collect();
+
+        // Reset the filter UI state.
+        self.state.special_filter = SpecialFilter::default();
     }
 
 
@@ -365,70 +504,69 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn node_passes_event_filter(&self, guid: &ProcessGuid) -> bool {
-        let f = &self.state.tree_event_filter;
-        if !f.any_active() {
+        let sf = &self.state.special_filter;
+        let mitre_active = !self.state.mitre_filter.is_empty();
+
+        if !sf.any_active() && !mitre_active {
             return true;
         }
-        if f.network
-            && !self
+
+        // Look up the node for integrity / user checks.
+        let node = match self.state.process_tree.get(guid) {
+            Some(n) => n,
+            None => return true, // synthetic/unknown — don't hide
+        };
+
+        // ── Integrity Level (AND) ────────────────────────────────────────────
+        if sf.any_integrity_active() {
+            let il = node.integrity_level.as_deref().unwrap_or("").to_lowercase();
+            let passes = (sf.integrity_system && il == "system")
+                || (sf.integrity_high   && il == "high")
+                || (sf.integrity_medium && il == "medium")
+                || (sf.integrity_low    && il == "low");
+            if !passes {
+                return false;
+            }
+        }
+
+        // ── User (AND) ───────────────────────────────────────────────────────
+        if !sf.users_checked.is_empty() {
+            let user = node.user.as_deref().unwrap_or("");
+            if !sf.users_checked.contains(user) {
+                return false;
+            }
+        }
+
+        // ── Network Activity (AND) ───────────────────────────────────────────
+        if sf.network && !self.state.network_processes.contains(guid) {
+            return false;
+        }
+
+        // ── Persistence Activity (AND) ───────────────────────────────────────
+        if sf.persistence && !self.state.persistence_processes.contains(guid) {
+            return false;
+        }
+
+        // ── MITRE Techniques (AND) ───────────────────────────────────────────
+        if mitre_active {
+            let has_match = self
                 .state
                 .event_store
-                .events_for_process_and_types(guid, &[3, 22])
-                .is_empty()
-        {
-            return true;
+                .events_for_process(guid)
+                .iter()
+                .any(|&idx| {
+                    self.state.event_store.events[idx]
+                        .mitre_technique
+                        .as_ref()
+                        .map(|m| self.state.mitre_filter.contains(&m.id))
+                        .unwrap_or(false)
+                });
+            if !has_match {
+                return false;
+            }
         }
-        if f.files
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[11, 15, 23, 26, 27, 28, 29])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.registry
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[12, 13, 14])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.pipes
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[17, 18])
-                .is_empty()
-        {
-            return true;
-        }
-        if f.injection
-            && (!self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[8, 10, 25])
-                .is_empty()
-                || !self
-                    .state
-                    .event_store
-                    .events_targeting_process(guid)
-                    .is_empty())
-        {
-            return true;
-        }
-        if f.drivers
-            && !self
-                .state
-                .event_store
-                .events_for_process_and_types(guid, &[6, 7])
-                .is_empty()
-        {
-            return true;
-        }
-        false
+
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -459,6 +597,19 @@ impl SysTraceApp {
             cs.set_open(open);
             cs.store(ctx);
         }
+    }
+
+    /// Returns true if this node OR any descendant passes the event/special filter.
+    /// Allows ancestor nodes to remain visible when a child matches the filter.
+    fn subtree_passes_event_filter(&self, guid: ProcessGuid) -> bool {
+        if self.node_passes_event_filter(&guid) {
+            return true;
+        }
+        let Some(node) = self.state.process_tree.get(&guid) else {
+            return false;
+        };
+        let children = node.children.clone();
+        children.iter().any(|&c| self.subtree_passes_event_filter(c))
     }
 
     /// Returns true if any node in the subtree rooted at `guid` matches the filter.
@@ -560,225 +711,37 @@ impl SysTraceApp {
             return;
         }
 
-        let available = ui.available_size();
-        let tree_width = (available.x * 0.35).max(250.0).min(450.0);
-
-        ui.horizontal(|ui| {
-            // ── Left: process tree with checkboxes ──────────────────────────
-            ui.allocate_ui(egui::vec2(tree_width, available.y), |ui| {
-                ui.vertical(|ui| {
-                    // Filter bar
-                    ui.horizontal(|ui| {
-                        ui.label("Filter:");
-                        egui::TextEdit::singleline(&mut self.state.timeline_filter)
-                            .hint_text("image, user, cmd, PID\u{2026}")
-                            .desired_width(ui.available_width() - 60.0)
-                            .show(ui);
-                        if !self.state.timeline_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
-                            self.state.timeline_filter.clear();
-                        }
-                    });
-
-                    // Select All / Deselect All
-                    ui.horizontal(|ui| {
-                        if ui.small_button("Select All").clicked() {
-                            let filter_lc = self.state.timeline_filter.to_lowercase();
-                            let guids: Vec<_> = self.state.process_tree.nodes.keys().copied()
-                                .filter(|g| Self::timeline_node_matches(&self.state, g, &filter_lc))
-                                .collect();
-                            self.state.timeline_checked.extend(guids);
-                        }
-                        if ui.small_button("Deselect All").clicked() {
-                            self.state.timeline_checked.clear();
-                            self.state.timeline_generated = false;
-                            self.state.timeline_events.clear();
-                        }
-                    });
-
-                    // Generate Timeline button
-                    let checked_count = self.state.timeline_checked.len();
-                    ui.horizontal(|ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new(format!("Generate Timeline ({checked_count} selected)"))
-                                .color(if checked_count > 0 {
-                                    egui::Color32::from_rgb(80, 200, 100)
-                                } else {
-                                    egui::Color32::GRAY
-                                })
-                        );
-                        if ui.add_enabled(checked_count > 0, btn).clicked() {
-                            let mut indices: Vec<usize> = Vec::new();
-                            for &guid in &self.state.timeline_checked {
-                                indices.extend(self.state.event_store.events_for_process(&guid));
-                            }
-                            indices.sort_by_key(|&i| self.state.event_store.events[i].time_created);
-                            indices.dedup();
-                            self.state.timeline_events = indices;
-                            self.state.timeline_generated = true;
-                            self.state.tab_timeline.selected_row = None;
-                        }
-                    });
-
-                    ui.separator();
-
-                    // Process tree with checkboxes
-                    let filter_lc = self.state.timeline_filter.to_lowercase();
-                    let roots: Vec<_> = self.state.process_tree.roots().to_vec();
-
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .show(ui, |ui| {
-                            for root in roots {
-                                self.render_timeline_tree_node(ui, root, &filter_lc);
-                            }
-                        });
-                });
-            });
-
-            ui.separator();
-
-            // ── Right: event table ──────────────────────────────────────────
-            ui.allocate_ui(ui.available_size(), |ui| {
-                if !self.state.timeline_generated {
-                    panels::render_empty(ui, "Select processes and click Generate Timeline.");
-                    return;
-                }
-
-                // Event filter bar
-                ui.horizontal(|ui| {
-                    ui.label("Filter events:");
-                    egui::TextEdit::singleline(&mut self.state.timeline_event_filter)
-                        .hint_text("Filter rows\u{2026}")
-                        .desired_width(ui.available_width() - 40.0)
-                        .show(ui);
-                    if !self.state.timeline_event_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
-                        self.state.timeline_event_filter.clear();
-                    }
-                });
-                ui.separator();
-
-                let events = self.state.timeline_events.clone();
-                let filter = self.state.timeline_event_filter.clone();
-                panels::timeline::render_timeline_table(
-                    ui,
-                    &self.state.event_store,
-                    &self.state.process_tree,
-                    &self.state.rodeo,
-                    &events,
-                    &mut self.state.tab_timeline,
-                    &filter,
-                );
-            });
-        });
-    }
-
-    fn render_timeline_tree_node(&mut self, ui: &mut Ui, guid: ProcessGuid, filter_lc: &str) {
-        let node = match self.state.process_tree.get(&guid) {
-            Some(n) => n,
-            None => return,
-        };
-
-        // Snapshot fields
-        let image_name = node.image_name.clone().unwrap_or_else(|| "?".to_owned());
-        let pid_str = node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_owned());
-        let is_synthetic = node.is_synthetic;
-        let is_terminated = node.end_time.is_some();
-        let user_str = node.user.clone().unwrap_or_else(|| "-".to_owned());
-        let children: Vec<_> = node.children.clone();
-
-        // Text filter — check if this subtree matches
-        if !filter_lc.is_empty() && !self.timeline_subtree_matches(guid, filter_lc) {
+        if !self.state.timeline_generated {
+            panels::render_empty(ui, "Select processes in the tree (checkboxes) and click Generate Timeline.");
             return;
         }
 
-        // Color coding
-        let is_injection_target = !self.state.event_store.events_targeting_process(&guid).is_empty();
-        let is_system = user_str.to_uppercase().contains("SYSTEM");
-        let text_color = if is_synthetic {
-            egui::Color32::DARK_GRAY
-        } else if is_injection_target {
-            egui::Color32::from_rgb(220, 60, 60)
-        } else if is_system {
-            egui::Color32::from_rgb(80, 180, 80)
-        } else if is_terminated {
-            egui::Color32::from_rgb(180, 180, 100)
-        } else {
-            ui.visuals().text_color()
-        };
-
-        let label = if is_synthetic {
-            format!("{image_name} ({pid_str}) [synthetic]")
-        } else {
-            format!("{image_name} ({pid_str})")
-        };
-
-        let mut checked = self.state.timeline_checked.contains(&guid);
-
-        if children.is_empty() {
-            // Leaf node
-            ui.horizontal(|ui| {
-                if ui.checkbox(&mut checked, "").changed() {
-                    if checked {
-                        self.state.timeline_checked.insert(guid);
-                    } else {
-                        self.state.timeline_checked.remove(&guid);
-                    }
-                }
-                ui.label(egui::RichText::new(&label).color(text_color));
-            });
-        } else {
-            // Parent node with collapsible children
-            let id = egui::Id::new(("timeline_node", guid));
-            let cs = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(), id, false,
-            );
-
-            cs.show_header(ui, |ui| {
-                if ui.checkbox(&mut checked, "").changed() {
-                    if checked {
-                        self.state.timeline_checked.insert(guid);
-                    } else {
-                        self.state.timeline_checked.remove(&guid);
-                    }
-                }
-                ui.label(egui::RichText::new(&label).color(text_color));
-            })
-            .body(|ui| {
-                for child in children {
-                    self.render_timeline_tree_node(ui, child, filter_lc);
-                }
-            });
-        }
-    }
-
-    fn timeline_node_matches(state: &crate::state::AppState, guid: &ProcessGuid, filter_lc: &str) -> bool {
-        if filter_lc.is_empty() {
-            return true;
-        }
-        let Some(node) = state.process_tree.get(guid) else { return false; };
-        let image_lc = node.image_name.as_deref().unwrap_or("").to_lowercase();
-        let cmd_lc = node.command_line.as_deref().unwrap_or("").to_lowercase();
-        let user_lc = node.user.as_deref().unwrap_or("").to_lowercase();
-        let pid_str = node.pid.map(|p| p.to_string()).unwrap_or_default();
-        image_lc.contains(filter_lc)
-            || cmd_lc.contains(filter_lc)
-            || user_lc.contains(filter_lc)
-            || pid_str.contains(filter_lc)
-    }
-
-    fn timeline_subtree_matches(&self, guid: ProcessGuid, filter_lc: &str) -> bool {
-        if Self::timeline_node_matches(&self.state, &guid, filter_lc) {
-            return true;
-        }
-        if let Some(node) = self.state.process_tree.get(&guid) {
-            for &child in &node.children {
-                if self.timeline_subtree_matches(child, filter_lc) {
-                    return true;
-                }
+        // Event filter bar
+        ui.horizontal(|ui| {
+            ui.label("Filter events:");
+            egui::TextEdit::singleline(&mut self.state.timeline_event_filter)
+                .hint_text("Filter rows\u{2026}")
+                .desired_width(ui.available_width() - 40.0)
+                .show(ui);
+            if !self.state.timeline_event_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
+                self.state.timeline_event_filter.clear();
             }
-        }
-        false
+        });
+        ui.separator();
+
+        let events = self.state.timeline_events.clone();
+        let filter = self.state.timeline_event_filter.clone();
+        panels::timeline::render_timeline_table(
+            ui,
+            &self.state.event_store,
+            &self.state.process_tree,
+            &self.state.rodeo,
+            &events,
+            &mut self.state.tab_timeline,
+            &filter,
+        );
     }
+
 
 
     // -----------------------------------------------------------------------
@@ -847,6 +810,14 @@ impl SysTraceApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+
+            if ui.button("Stats").clicked() {
+                self.state.show_stats = !self.state.show_stats;
+            }
+
+            if ui.button("Help").clicked() {
+                self.state.show_help = !self.state.show_help;
+            }
         });
     }
 
@@ -934,36 +905,173 @@ impl SysTraceApp {
             }
         });
 
-        // Event type filter checkboxes
-        egui::CollapsingHeader::new("Event Type Filter")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut self.state.tree_event_filter.network, "Network");
-                    ui.checkbox(&mut self.state.tree_event_filter.files, "Files");
-                    ui.checkbox(&mut self.state.tree_event_filter.registry, "Registry");
-                    ui.checkbox(&mut self.state.tree_event_filter.pipes, "Pipes");
-                    ui.checkbox(&mut self.state.tree_event_filter.injection, "Injection");
-                    ui.checkbox(&mut self.state.tree_event_filter.drivers, "Drivers");
-                });
-                if self.state.tree_event_filter.any_active()
-                    && ui.small_button("Clear All").clicked()
-                {
-                    self.state.tree_event_filter = TreeEventFilter::default();
+        let is_timeline_mode = self.state.active_tab == TelemetryTab::Timeline;
+
+        if is_timeline_mode {
+            // Timeline mode: show selection controls instead of event type filter
+            ui.horizontal(|ui| {
+                if ui.small_button("Select All").clicked() {
+                    let filter_lc = self.state.search_filter.to_lowercase();
+                    let guids: Vec<_> = self.state.process_tree.nodes.keys().copied()
+                        .filter(|g| {
+                            if filter_lc.is_empty() { return true; }
+                            self.subtree_matches_filter(*g, &filter_lc)
+                        })
+                        .collect();
+                    self.state.timeline_checked.extend(guids);
+                }
+                if ui.small_button("Deselect All").clicked() {
+                    self.state.timeline_checked.clear();
+                    self.state.timeline_generated = false;
+                    self.state.timeline_events.clear();
                 }
             });
 
+            // Generate Timeline button
+            let checked_count = self.state.timeline_checked.len();
+            ui.horizontal(|ui| {
+                let btn = egui::Button::new(
+                    egui::RichText::new(format!("Generate Timeline ({checked_count} selected)"))
+                        .color(if checked_count > 0 {
+                            egui::Color32::from_rgb(80, 200, 100)
+                        } else {
+                            egui::Color32::GRAY
+                        })
+                );
+                if ui.add_enabled(checked_count > 0, btn).clicked() {
+                    let mut indices: Vec<usize> = Vec::new();
+                    for &guid in &self.state.timeline_checked {
+                        indices.extend(self.state.event_store.events_for_process(&guid));
+                    }
+                    indices.sort_unstable();
+                    indices.dedup();
+                    indices.sort_by_key(|&i| self.state.event_store.events[i].time_created);
+                    self.state.timeline_events = indices;
+                    self.state.timeline_generated = true;
+                    self.state.tab_timeline.selected_row = None;
+                    self.state.timeline_event_filter.clear();
+                }
+            });
+        }
+
         ui.separator();
 
-        // Expand All / Collapse All buttons
-        ui.horizontal(|ui| {
-            if ui.small_button("Expand All").clicked() {
-                self.set_all_tree_open(ui.ctx(), true);
+        // ── Toolbar row: Expand All / Collapse All / Filter toggle ───────────
+        {
+            let sf_count = self.state.special_filter.active_category_count();
+            let mitre_count = if self.state.mitre_filter.is_empty() { 0 } else { 1 };
+            let total_active = sf_count + mitre_count;
+            let any_active = total_active > 0;
+
+            ui.horizontal(|ui| {
+                if ui.small_button("Expand All").clicked() {
+                    self.set_all_tree_open(ui.ctx(), true);
+                }
+                if ui.small_button("Collapse All").clicked() {
+                    self.set_all_tree_open(ui.ctx(), false);
+                }
+                let label = if total_active > 0 {
+                    format!("Filter ({})", total_active)
+                } else {
+                    "Filter".to_string()
+                };
+                let mut btn = egui::Button::new(label);
+                if self.state.show_filters || any_active {
+                    btn = btn.fill(ui.visuals().selection.bg_fill);
+                }
+                if ui.add(btn).clicked() {
+                    self.state.show_filters = !self.state.show_filters;
+                }
+                if any_active && ui.small_button("✕").clicked() {
+                    self.state.special_filter = SpecialFilter::default();
+                    self.state.mitre_filter.clear();
+                }
+            });
+
+            if self.state.show_filters {
+                ui.indent("filter_panel", |ui| {
+                    // ── Integrity Level ───────────────────────────────────
+                    egui::CollapsingHeader::new("Integrity Level")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.checkbox(&mut self.state.special_filter.integrity_system, "System");
+                            ui.checkbox(&mut self.state.special_filter.integrity_high,   "High");
+                            ui.checkbox(&mut self.state.special_filter.integrity_medium, "Medium");
+                            ui.checkbox(&mut self.state.special_filter.integrity_low,    "Low");
+                            if self.state.special_filter.any_integrity_active()
+                                && ui.small_button("Clear").clicked()
+                            {
+                                self.state.special_filter.integrity_system = false;
+                                self.state.special_filter.integrity_high   = false;
+                                self.state.special_filter.integrity_medium = false;
+                                self.state.special_filter.integrity_low    = false;
+                            }
+                        });
+
+                    // ── User ──────────────────────────────────────────────
+                    if !self.state.available_users.is_empty() {
+                        let users: Vec<String> = self.state.available_users.clone();
+                        egui::CollapsingHeader::new("User")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for user in &users {
+                                    let mut checked = self.state.special_filter.users_checked.contains(user);
+                                    if ui.checkbox(&mut checked, user.as_str()).changed() {
+                                        if checked {
+                                            self.state.special_filter.users_checked.insert(user.clone());
+                                        } else {
+                                            self.state.special_filter.users_checked.remove(user);
+                                        }
+                                    }
+                                }
+                                if !self.state.special_filter.users_checked.is_empty()
+                                    && ui.small_button("Clear").clicked()
+                                {
+                                    self.state.special_filter.users_checked.clear();
+                                }
+                            });
+                    }
+
+                    // ── Activity ──────────────────────────────────────────
+                    egui::CollapsingHeader::new("Activity")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.checkbox(&mut self.state.special_filter.network,     "Network Connection");
+                            ui.checkbox(&mut self.state.special_filter.persistence, "Persistence Activity");
+                            if (self.state.special_filter.network || self.state.special_filter.persistence)
+                                && ui.small_button("Clear").clicked()
+                            {
+                                self.state.special_filter.network     = false;
+                                self.state.special_filter.persistence = false;
+                            }
+                        });
+
+                    // ── MITRE Techniques ──────────────────────────────────
+                    if !self.state.available_mitre.is_empty() {
+                        let mitre_ids: Vec<String> = self.state.available_mitre.iter().cloned().collect();
+                        egui::CollapsingHeader::new("MITRE Techniques")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for id in &mitre_ids {
+                                    let mut checked = self.state.mitre_filter.contains(id);
+                                    if ui.checkbox(&mut checked, id.as_str()).changed() {
+                                        if checked {
+                                            self.state.mitre_filter.insert(id.clone());
+                                        } else {
+                                            self.state.mitre_filter.remove(id);
+                                        }
+                                    }
+                                }
+                                if !self.state.mitre_filter.is_empty()
+                                    && ui.small_button("Clear All").clicked()
+                                {
+                                    self.state.mitre_filter.clear();
+                                }
+                            });
+                    }
+                });
             }
-            if ui.small_button("Collapse All").clicked() {
-                self.set_all_tree_open(ui.ctx(), false);
-            }
-        });
+        }
 
         ui.separator();
 
@@ -1075,8 +1183,16 @@ impl SysTraceApp {
             return;
         }
 
-        // Event type filter
+        // Event type filter — guard: skip entire subtree if nothing in it passes
+        if !self.subtree_passes_event_filter(guid) {
+            return;
+        }
+        // If this node itself fails the filter, skip its row but still recurse into children
+        // so that deeply nested matching processes remain reachable.
         if !self.node_passes_event_filter(&guid) {
+            for child in children {
+                self.render_tree_node(ui, child);
+            }
             return;
         }
 
@@ -1129,32 +1245,46 @@ impl SysTraceApp {
 
         // --- Render node (leaf vs collapsible) ---
         let do_expand = Cell::new(false);
+        let is_timeline_mode = self.state.active_tab == TelemetryTab::Timeline;
 
         if children.is_empty() {
-            let rich = egui::RichText::new(&label).color(text_color);
-            let resp = ui.selectable_label(is_selected, rich);
-            if resp.clicked() {
-                self.select_process(guid);
-            }
-            if should_scroll {
-                resp.scroll_to_me(Some(egui::Align::Center));
-                self.state.scroll_to_selected = false;
-            }
-            resp.on_hover_ui(|ui| {
-                ui.label(format!("Image: {image_full}"));
-                ui.label(format!("Command: {cmd}"));
-                ui.label(format!("User: {user_str}"));
-                ui.label(format!("Started: {start_str}"));
-            })
-            .context_menu(|ui| {
-                if ui.button("Copy GUID").clicked() {
-                    ui.ctx().copy_text(guid_hex.clone());
-                    ui.close_menu();
+            ui.horizontal(|ui| {
+                // Timeline checkbox (before the label)
+                if is_timeline_mode {
+                    let mut checked = self.state.timeline_checked.contains(&guid);
+                    if ui.checkbox(&mut checked, "").changed() {
+                        if checked {
+                            self.state.timeline_checked.insert(guid);
+                        } else {
+                            self.state.timeline_checked.remove(&guid);
+                        }
+                    }
                 }
-                if ui.button("Copy Command Line").clicked() {
-                    ui.ctx().copy_text(cmd_for_copy.clone());
-                    ui.close_menu();
+                let rich = egui::RichText::new(&label).color(text_color);
+                let resp = ui.selectable_label(is_selected, rich);
+                if resp.clicked() {
+                    self.select_process(guid);
                 }
+                if should_scroll {
+                    resp.scroll_to_me(Some(egui::Align::Center));
+                    self.state.scroll_to_selected = false;
+                }
+                resp.on_hover_ui(|ui| {
+                    ui.label(format!("Image: {image_full}"));
+                    ui.label(format!("Command: {cmd}"));
+                    ui.label(format!("User: {user_str}"));
+                    ui.label(format!("Started: {start_str}"));
+                })
+                .context_menu(|ui| {
+                    if ui.button("Copy GUID").clicked() {
+                        ui.ctx().copy_text(guid_hex.clone());
+                        ui.close_menu();
+                    }
+                    if ui.button("Copy Command Line").clicked() {
+                        ui.ctx().copy_text(cmd_for_copy.clone());
+                        ui.close_menu();
+                    }
+                });
             });
         } else {
             let id = tree_node_id(guid);
@@ -1165,6 +1295,17 @@ impl SysTraceApp {
             );
 
             cs.show_header(ui, |ui| {
+                // Timeline checkbox (before the label)
+                if is_timeline_mode {
+                    let mut checked = self.state.timeline_checked.contains(&guid);
+                    if ui.checkbox(&mut checked, "").changed() {
+                        if checked {
+                            self.state.timeline_checked.insert(guid);
+                        } else {
+                            self.state.timeline_checked.remove(&guid);
+                        }
+                    }
+                }
                 let rich = egui::RichText::new(&label).color(text_color);
                 let resp = ui.selectable_label(is_selected, rich);
                 if resp.clicked() {
@@ -1223,6 +1364,7 @@ impl SysTraceApp {
             TelemetryTab::Pipes,
             TelemetryTab::Injection,
             TelemetryTab::DriversModules,
+            TelemetryTab::Detection,
             TelemetryTab::Timeline,
         ];
         let (tab_forward, tab_backward) = ui.ctx().input(|i| {
@@ -1252,6 +1394,7 @@ impl SysTraceApp {
                 (TelemetryTab::Pipes, "Pipes"),
                 (TelemetryTab::Injection, "Injection"),
                 (TelemetryTab::DriversModules, "Modules"),
+                (TelemetryTab::Detection, "Detection"),
                 (TelemetryTab::Timeline, "Timeline"),
             ] {
                 if ui
@@ -1390,6 +1533,20 @@ impl SysTraceApp {
                     panels::render_no_selection(ui);
                 }
             }
+            TelemetryTab::Detection => {
+                if let Some(guid) = self.state.selected_process {
+                    panels::detection::render_detection_table(
+                        ui,
+                        &self.state.event_store,
+                        guid,
+                        &mut self.state.tab_detection,
+                        &filter,
+                        time_range,
+                    );
+                } else {
+                    panels::render_no_selection(ui);
+                }
+            }
             TelemetryTab::Timeline => {
                 self.render_timeline_tab(ui);
             }
@@ -1410,6 +1567,7 @@ impl SysTraceApp {
         let (
             ov_image, ov_pid, ov_guid_str, ov_cmdline, ov_user, ov_integrity, ov_logon_id,
             ov_computer, ov_start, ov_end, ov_hashes, ov_parent_image, ov_parent_pid,
+            ov_file_version, ov_description, ov_product, ov_company, ov_original_file_name,
         ) = match self.state.process_tree.get(&guid) {
             None => return,
             Some(node) => (
@@ -1432,6 +1590,11 @@ impl SysTraceApp {
                 node.hashes.clone().unwrap_or_else(|| "-".to_owned()),
                 node.parent_image.clone().unwrap_or_else(|| "-".to_owned()),
                 node.parent_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_owned()),
+                node.file_version.clone().unwrap_or_else(|| "-".to_owned()),
+                node.description.clone().unwrap_or_else(|| "-".to_owned()),
+                node.product.clone().unwrap_or_else(|| "-".to_owned()),
+                node.company.clone().unwrap_or_else(|| "-".to_owned()),
+                node.original_file_name.clone().unwrap_or_else(|| "-".to_owned()),
             ),
         };
         // process_tree borrow dropped here — can now use &mut self below
@@ -1502,6 +1665,11 @@ impl SysTraceApp {
                                 row!("Computer", ov_computer.as_str());
                                 row!("Start Time", ov_start.as_str());
                                 row!("End Time", ov_end.as_str());
+                                row!("File Version", ov_file_version.as_str());
+                                row!("Description", ov_description.as_str());
+                                row!("Product", ov_product.as_str());
+                                row!("Company", ov_company.as_str());
+                                row!("Original File Name", ov_original_file_name.as_str());
                                 // Split hashes into separate rows (MD5, SHA256, IMPHASH)
                                 {
                                     let mut md5 = "-";
@@ -1613,6 +1781,450 @@ impl SysTraceApp {
                 );
             });
     }
+    // -----------------------------------------------------------------------
+    // Stats popup
+    // -----------------------------------------------------------------------
+
+    fn render_stats_window(&mut self, ctx: &egui::Context) {
+        use crate::panels::{event_color, event_label};
+
+        let mut open = self.state.show_stats;
+
+        egui::Window::new("Statistics")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(460.0)
+            .default_height(560.0)
+            .show(ctx, |ui| {
+                let rodeo = self.state.rodeo.clone();
+
+                // ── Determine host filter ─────────────────────────────────
+                let host_filter = self.state.selected_host.as_deref();
+
+                // ── Collect filtered events ───────────────────────────────
+                let total_events = self.state.event_store.len();
+                let filtered_events: Vec<&systrace_core::SysmonEvent> = self
+                    .state
+                    .event_store
+                    .events
+                    .iter()
+                    .filter(|ev| {
+                        if let Some(host) = host_filter {
+                            rodeo.resolve(&ev.computer) == host
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                let filtered_count = filtered_events.len();
+
+                // ── Time range ────────────────────────────────────────────
+                let time_range = if filtered_events.is_empty() {
+                    None
+                } else {
+                    let min_t = filtered_events.iter().map(|e| e.time_created).min();
+                    let max_t = filtered_events.iter().map(|e| e.time_created).max();
+                    min_t.zip(max_t)
+                };
+
+                // ── Per-EventID counts ────────────────────────────────────
+                let mut event_id_counts: std::collections::BTreeMap<u16, usize> =
+                    std::collections::BTreeMap::new();
+                for ev in &filtered_events {
+                    *event_id_counts.entry(ev.event_id).or_insert(0) += 1;
+                }
+
+                // ── Per-computer counts ───────────────────────────────────
+                let mut host_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for ev in &filtered_events {
+                    let computer = rodeo.resolve(&ev.computer).to_owned();
+                    *host_counts.entry(computer).or_insert(0) += 1;
+                }
+
+                // ── Process-level stats (nodes matching host filter) ──────
+                let mut user_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                let mut integrity_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for node in self.state.process_tree.nodes.values() {
+                    if let Some(host) = host_filter {
+                        if node.computer != host {
+                            continue;
+                        }
+                    }
+                    if !node.is_synthetic {
+                        let user = node.user.as_deref().unwrap_or("(unknown)").to_owned();
+                        *user_counts.entry(user).or_insert(0) += 1;
+                        let il = node.integrity_level.as_deref().unwrap_or("(unknown)").to_owned();
+                        *integrity_counts.entry(il).or_insert(0) += 1;
+                    }
+                }
+
+                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    // ── Summary cards ─────────────────────────────────────
+                    let proc_count = if host_filter.is_some() {
+                        user_counts.values().sum::<usize>()
+                    } else {
+                        self.state.process_tree.nodes.values()
+                            .filter(|n| !n.is_synthetic).count()
+                    };
+                    let event_types_seen = event_id_counts.len();
+
+                    let accent   = ui.visuals().selection.bg_fill;
+                    let clr_proc = egui::Color32::from_rgb(60, 180, 100);
+                    let clr_type = egui::Color32::from_rgb(210, 140, 40);
+                    let clr_dur  = egui::Color32::from_rgb(120, 160, 220);
+
+                    // Row 1: 3 metric cards
+                    ui.columns(3, |cols| {
+                        stat_card(&mut cols[0], &format!("{filtered_count}"), "Events", accent);
+                        stat_card(&mut cols[1], &format!("{proc_count}"), "Processes", clr_proc);
+                        stat_card(&mut cols[2], &format!("{event_types_seen}"), "Event Types", clr_type);
+                    });
+
+                    ui.add_space(6.0);
+
+                    // Row 2: duration + host
+                    if let Some((t_min, t_max)) = time_range {
+                        let duration   = t_max - t_min;
+                        let total_secs = duration.num_seconds().abs();
+                        let h = total_secs / 3600;
+                        let m = (total_secs % 3600) / 60;
+                        let s = total_secs % 60;
+                        let dur_str = if h > 0 { format!("{h}h {m}m {s}s") }
+                                      else if m > 0 { format!("{m}m {s}s") }
+                                      else { format!("{s}s") };
+
+                        ui.columns(2, |cols| {
+                            stat_card(&mut cols[0], &dur_str, "Duration", clr_dur);
+                            stat_card(&mut cols[1], host_filter.unwrap_or("All"), "Host", egui::Color32::GRAY);
+                        });
+
+                        ui.add_space(6.0);
+
+                        // Time range banner
+                        egui::Frame::new()
+                            .fill(ui.visuals().faint_bg_color)
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(
+                                        t_min.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                                    ).small().color(ui.visuals().weak_text_color()));
+                                    ui.label(egui::RichText::new("→").small());
+                                    ui.label(egui::RichText::new(
+                                        t_max.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                                    ).small().color(ui.visuals().weak_text_color()));
+                                });
+                            });
+                    } else {
+                        ui.columns(1, |cols| {
+                            stat_card(&mut cols[0], host_filter.unwrap_or("All"), "Host", egui::Color32::GRAY);
+                        });
+                    }
+
+                    ui.add_space(12.0);
+
+                    // ── Integrity distribution ────────────────────────────
+                    ui.strong("Integrity Level (Processes)");
+                    ui.add_space(4.0);
+                    if integrity_counts.is_empty() {
+                        ui.label("No process data loaded.");
+                    } else {
+                        let total_procs: usize = integrity_counts.values().sum();
+                        // Order: System, High, Medium, Low, then others
+                        let order = ["system","high","medium","low"];
+                        let mut items: Vec<(String, usize, egui::Color32)> = order.iter()
+                            .filter_map(|k| {
+                                integrity_counts.iter()
+                                    .find(|(il, _)| il.to_lowercase() == *k)
+                                    .map(|(il, &c)| {
+                                        let color = match il.to_lowercase().as_str() {
+                                            "system" => egui::Color32::from_rgb(200, 60, 60),
+                                            "high"   => egui::Color32::from_rgb(210, 120, 40),
+                                            "medium" => egui::Color32::from_rgb(180, 180, 50),
+                                            _        => egui::Color32::from_rgb(60, 180, 80),
+                                        };
+                                        (il.clone(), c, color)
+                                    })
+                            })
+                            .collect();
+                        // Append any unlisted integrity levels
+                        for (il, &c) in &integrity_counts {
+                            if !order.iter().any(|k| il.to_lowercase() == *k) {
+                                items.push((il.clone(), c, egui::Color32::GRAY));
+                            }
+                        }
+                        stats_bar_chart(ui, &items, total_procs);
+                    }
+
+                    ui.add_space(12.0);
+
+                    // ── Per-user process count ────────────────────────────
+                    ui.strong("Processes per User");
+                    ui.add_space(4.0);
+                    if user_counts.is_empty() {
+                        ui.label("No process data loaded.");
+                    } else {
+                        let total_procs: usize = user_counts.values().sum();
+                        let palette: &[egui::Color32] = &[
+                            egui::Color32::from_rgb(86, 180, 233),
+                            egui::Color32::from_rgb(230, 159, 0),
+                            egui::Color32::from_rgb(0, 158, 115),
+                            egui::Color32::from_rgb(240, 228, 66),
+                            egui::Color32::from_rgb(0, 114, 178),
+                            egui::Color32::from_rgb(213, 94, 0),
+                            egui::Color32::from_rgb(204, 121, 167),
+                        ];
+                        let mut user_vec: Vec<(&String, usize)> = user_counts.iter()
+                            .map(|(u, &c)| (u, c)).collect();
+                        user_vec.sort_by(|a, b| b.1.cmp(&a.1));
+                        let items: Vec<(String, usize, egui::Color32)> = user_vec.iter()
+                            .take(12)
+                            .enumerate()
+                            .map(|(i, (u, c))| (u.to_string(), *c, palette[i % palette.len()]))
+                            .collect();
+                        stats_bar_chart(ui, &items, total_procs);
+                    }
+
+                    ui.add_space(12.0);
+
+                    // ── Per-EventID breakdown ─────────────────────────────
+                    ui.strong("Event Type Breakdown");
+                    ui.add_space(4.0);
+                    if !event_id_counts.is_empty() {
+                        let mut ev_vec: Vec<(u16, usize)> = event_id_counts.iter()
+                            .map(|(&id, &c)| (id, c)).collect();
+                        ev_vec.sort_by(|a, b| b.1.cmp(&a.1));
+                        let items: Vec<(String, usize, egui::Color32)> = ev_vec.iter()
+                            .take(20)
+                            .map(|(id, c)| {
+                                let label = format!("{} — {}", id, event_label(*id));
+                                (*c, label, event_color(*id))
+                            })
+                            .map(|(c, l, col)| (l, c, col))
+                            .collect();
+                        stats_bar_chart(ui, &items, filtered_count);
+                    }
+
+                    ui.add_space(12.0);
+
+                    // ── Host breakdown ────────────────────────────────────
+                    if host_counts.len() > 1 {
+                        ui.strong("Host / Computer Breakdown");
+                        ui.add_space(4.0);
+                        let accent = ui.visuals().selection.bg_fill;
+                        let mut host_vec: Vec<(&String, usize)> = host_counts.iter()
+                            .map(|(h, &c)| (h, c)).collect();
+                        host_vec.sort_by(|a, b| b.1.cmp(&a.1));
+                        let items: Vec<(String, usize, egui::Color32)> = host_vec.iter()
+                            .map(|(h, c)| (h.to_string(), *c, accent))
+                            .collect();
+                        stats_bar_chart(ui, &items, total_events);
+                    }
+                });
+            });
+
+        self.state.show_stats = open;
+    }
+
+    // -----------------------------------------------------------------------
+    // Help window
+    // -----------------------------------------------------------------------
+
+    fn render_help_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.state.show_help;
+        egui::Window::new("Help")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(520.0)
+            .default_height(420.0)
+            .show(ctx, |ui| {
+                // Tab bar
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (HelpTab::ColorGuide, "Color Guide"),
+                        (HelpTab::KeyboardShortcuts, "Keyboard Shortcuts"),
+                        (HelpTab::FeatureGuide, "Feature Guide"),
+                    ] {
+                        if ui.selectable_label(self.state.help_tab == tab, label).clicked() {
+                            self.state.help_tab = tab;
+                        }
+                    }
+                });
+                ui.separator();
+
+                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    match self.state.help_tab {
+                        HelpTab::ColorGuide => self.render_help_color_guide(ui),
+                        HelpTab::KeyboardShortcuts => self.render_help_shortcuts(ui),
+                        HelpTab::FeatureGuide => self.render_help_feature_guide(ui),
+                    }
+                });
+            });
+        self.state.show_help = open;
+    }
+
+    fn render_help_color_guide(&self, ui: &mut egui::Ui) {
+        let swatch = |ui: &mut egui::Ui, color: egui::Color32, label: &str| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(16.0, 16.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().rect_filled(rect, 2.0, color);
+                ui.label(label);
+            });
+        };
+
+        ui.strong("Process Tree Colors");
+        ui.add_space(4.0);
+        swatch(ui, egui::Color32::DARK_GRAY,              "Synthetic — process inferred from parent GUID, no EventId 1");
+        swatch(ui, egui::Color32::from_rgb(220, 60, 60),  "Injection target — process was accessed/injected into");
+        swatch(ui, egui::Color32::from_rgb(80, 180, 80),  "SYSTEM user — process running as SYSTEM");
+        swatch(ui, egui::Color32::from_rgb(180, 180, 100),"Terminated — EventId 5 (ProcessTerminate) seen");
+        ui.label("(default)  Normal process");
+
+        ui.add_space(10.0);
+        ui.strong("Event / Panel Colors");
+        ui.add_space(4.0);
+        swatch(ui, egui::Color32::from_rgb(60, 130, 220),  "Network — EventId 3/22");
+        swatch(ui, egui::Color32::from_rgb(80, 180, 80),   "Files — EventId 11/15/23/26/27/28/29");
+        swatch(ui, egui::Color32::from_rgb(220, 140, 40),  "Registry — EventId 12/13/14");
+        swatch(ui, egui::Color32::from_rgb(220, 60, 60),   "Injection — EventId 8/10/25");
+        swatch(ui, egui::Color32::from_rgb(160, 80, 220),  "Pipes — EventId 17/18");
+        swatch(ui, egui::Color32::from_rgb(80, 180, 220),  "Drivers/Modules — EventId 6/7");
+
+        ui.add_space(10.0);
+        ui.strong("Integrity Level Colors (Overview tab)");
+        ui.add_space(4.0);
+        swatch(ui, egui::Color32::from_rgb(220, 60, 60),  "System integrity");
+        swatch(ui, egui::Color32::from_rgb(255, 165, 0),  "High integrity");
+        ui.label("(default)  Medium / Low integrity");
+
+        ui.add_space(10.0);
+        ui.strong("MITRE ATT&CK");
+        ui.add_space(4.0);
+        swatch(ui, egui::Color32::from_rgb(220, 120, 60), "MITRE technique ID (shown in all telemetry columns)");
+        ui.label("  ⚑ flag prefix in tree = process has at least one MITRE-tagged event");
+    }
+
+    fn render_help_shortcuts(&self, ui: &mut egui::Ui) {
+        let shortcuts: &[(&str, &str)] = &[
+            ("Ctrl+O",           "Open file dialog"),
+            ("Ctrl+F",           "Focus process search box"),
+            ("Arrow Up/Down",    "Navigate process tree (when search not focused)"),
+            ("Ctrl+Tab",         "Cycle to next telemetry tab"),
+            ("Ctrl+Shift+Tab",   "Cycle to previous telemetry tab"),
+            ("Click row",        "Select telemetry table row"),
+            ("Click column header", "Sort telemetry table by that column (toggles asc/desc)"),
+            ("Right-click row",  "Copy individual columns or full row"),
+            ("Right-click tree node", "Copy GUID, command line; expand all children"),
+            ("Drag & Drop",      "Drop a .json / .ndjson file onto the window to open it"),
+        ];
+
+        egui::Grid::new("shortcuts_grid")
+            .num_columns(2)
+            .striped(true)
+            .min_col_width(180.0)
+            .show(ui, |ui| {
+                ui.strong("Shortcut");
+                ui.strong("Action");
+                ui.end_row();
+                for (key, action) in shortcuts {
+                    ui.label(egui::RichText::new(*key).monospace());
+                    ui.label(*action);
+                    ui.end_row();
+                }
+            });
+    }
+
+    fn render_help_feature_guide(&self, ui: &mut egui::Ui) {
+        let section = |ui: &mut egui::Ui, title: &str, body: &str| {
+            ui.strong(title);
+            ui.add_space(2.0);
+            ui.label(body);
+            ui.add_space(8.0);
+        };
+
+        section(ui, "Process Tree (left panel)",
+            "Shows all processes from Sysmon EventId 1. Click a node to select it and view \
+             its telemetry. Use the search box (🔍) to filter by name, PID, user, or command \
+             line. Expand All / Collapse All and the Filter toggle are in the toolbar row below \
+             the search box. The Filter panel is always accessible, including while in Timeline mode. \
+             ⚑ prefix = process has at least one MITRE-tagged event. 🔖 prefix = bookmarked.");
+
+        section(ui, "Filter panel",
+            "Click the Filter button in the toolbar to expand forensic filters. All categories \
+             are AND logic — a process must satisfy every active category to appear.\n\
+             • Integrity Level — System / High / Medium / Low checkboxes.\n\
+             • User — checkbox per unique user found in real (non-synthetic) ProcessCreate events.\n\
+             • Activity — Network Connection (has EventId 3/22) or Persistence Activity \
+             (touches Run keys, Services, Task Scheduler, WMI, Winlogon, AppInit_DLLs, \
+             or is schtasks.exe / at.exe).\n\
+             • MITRE Techniques — checkbox per technique ID found in loaded events.\n\
+             The badge on the button (e.g. \"Filter (2)\") shows how many categories are active. \
+             Click ✕ to clear all at once. Parent nodes without matching events are skipped \
+             but their children are still shown if they match.");
+
+        section(ui, "Overview tab",
+            "Shows process metadata: image path, PID, GUID, command line, user, integrity, \
+             hashes, parent, file version, description, product, company. Below that: \
+             per-category event counts. MITRE ATT&CK annotations appear if present. \
+             The Notes field lets you attach investigation notes (bookmarks) to a process.");
+
+        section(ui, "Network tab",
+            "EventId 3 (NetworkConnect) and 22 (DnsQuery) for the selected process. \
+             Columns: Time, Direction, Protocol, Source, Destination, Hostname, MITRE. \
+             Right-click any row to copy individual fields or the full row.");
+
+        section(ui, "Files tab",
+            "File system events: EventId 11 (Create), 15 (ADS Stream), 23/26 (Delete), \
+             27/28/29 (Block/Exec). Columns: Time, Action, Target Filename, Hashes, MITRE.");
+
+        section(ui, "Registry tab",
+            "Registry events: EventId 12 (Create/Delete key), 13 (SetValue), 14 (Rename). \
+             Columns: Time, Action, Target Object, Details, MITRE.");
+
+        section(ui, "Pipes tab",
+            "Named pipe events: EventId 17 (Create), 18 (Connect). \
+             Columns: Time, Action, Pipe Name, MITRE.");
+
+        section(ui, "Injection tab",
+            "Process injection events: EventId 8 (CreateRemoteThread), 10 (ProcessAccess), \
+             25 (ProcessTampering). Shows both source and target side for the selected process. \
+             Columns: Time, Type, Role, Source, Target, Details, MITRE.");
+
+        section(ui, "Modules tab",
+            "Driver/image loads: EventId 6 (DriverLoad), 7 (ImageLoad). \
+             Columns: Time, Type, Image Loaded, Signature, Status, MITRE.");
+
+        section(ui, "Detection tab",
+            "Suspicious events not shown elsewhere: EventId 2 (FileCreateTime/timestomp), \
+             4 (SysmonState), 9 (RawAccessRead), 16 (ConfigChange), 19-21 (WMI), \
+             24 (ClipboardChange). Color-coded by category with a legend bar at the top.");
+
+        section(ui, "Timeline tab",
+            "Cross-process event timeline. Check processes in the tree (checkboxes appear \
+             on the left when this tab is active), then click Generate Timeline to see all \
+             their events sorted by time in one table. Supports horizontal scrolling and \
+             right-click copy per column. The Filter panel remains available in the sidebar \
+             to narrow which processes appear in the tree before selecting.");
+
+        section(ui, "Stats popup (menu bar)",
+            "Click Stats in the menu bar for a summary of the loaded file. Shows metric \
+             cards (event count, process count, event types seen, duration, time range) \
+             and horizontal bar charts for: Integrity Level distribution, Processes per User \
+             (top 12), Event Type Breakdown (top 20), and Host breakdown (if multi-host). \
+             Stats respect the current host filter.");
+
+        section(ui, "Export (File menu)",
+            "Events as CSV — all events with time, EventID, type, computer, image, user. \
+             Events as JSON — same data as JSON array. \
+             Process Tree as DOT — Graphviz dot file for visualisation.");
+    }
 }
 
 impl eframe::App for SysTraceApp {
@@ -1644,6 +2256,16 @@ impl eframe::App for SysTraceApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             self.render_menu(ui, ctx);
         });
+
+        // Stats popup (floating)
+        if self.state.show_stats {
+            self.render_stats_window(ctx);
+        }
+
+        // Help window (floating)
+        if self.state.show_help {
+            self.render_help_window(ctx);
+        }
 
         // Status bar (registered first so it appears at the very bottom)
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {

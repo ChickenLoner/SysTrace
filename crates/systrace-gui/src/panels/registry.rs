@@ -13,16 +13,18 @@ struct RegistryRow {
     action: String,
     target_object: String,
     details: String,
+    mitre: String,
 }
 
 impl RegistryRow {
     fn copy_text(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}",
             fmt_time(self.time),
             self.action,
             self.target_object,
             self.details,
+            self.mitre,
         )
     }
 }
@@ -68,6 +70,7 @@ pub fn render_registry(
                         action,
                         target_object: target_object.clone().unwrap_or_default(),
                         details: detail_str,
+                        mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                     })
                 }
                 _ => None,
@@ -94,11 +97,12 @@ pub fn render_registry(
         1 => rows.sort_by(|a, b| cmp_ord(a.action.cmp(&b.action), sort_asc)),
         2 => rows.sort_by(|a, b| cmp_ord(a.target_object.cmp(&b.target_object), sort_asc)),
         3 => rows.sort_by(|a, b| cmp_ord(a.details.cmp(&b.details), sort_asc)),
+        4 => rows.sort_by(|a, b| cmp_ord(a.mitre.cmp(&b.mitre), sort_asc)),
         _ => {}
     }
 
     let selected = tab.selected_row;
-    let headers = make_headers(&["Time", "Action", "Target Object", "Details"], &tab.sort);
+    let headers = make_headers(&["Time", "Action", "Target Object", "Details", "MITRE"], &tab.sort);
 
     let mut next_sort: Option<usize> = None;
     let mut next_selected = selected;
@@ -111,8 +115,9 @@ pub fn render_registry(
             .sense(egui::Sense::click())
             .column(Column::initial(185.0).clip(true))  // Time
             .column(Column::initial(130.0).clip(true))  // Action
-            .column(Column::remainder().clip(true).at_least(260.0)) // Key / Target
+            .column(Column::initial(260.0).clip(true))  // Key / Target
             .column(Column::initial(220.0).clip(true))  // Value
+            .column(Column::remainder().clip(true).at_least(80.0))  // MITRE
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
@@ -131,6 +136,11 @@ pub fn render_registry(
                     row.col(|ui| { ui.label(&r.action); });
                     row.col(|ui| { ui.label(&r.target_object); });
                     row.col(|ui| { ui.label(&r.details); });
+                    row.col(|ui| {
+                        if !r.mitre.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(220, 120, 60), &r.mitre);
+                        }
+                    });
                     let resp = row.response();
                     if resp.clicked() {
                         next_selected = Some(i);
@@ -155,6 +165,10 @@ pub fn render_registry(
                         }
                         if ui.button("Copy Details").clicked() {
                             ui.ctx().copy_text(r.details.clone());
+                            ui.close_menu();
+                        }
+                        if !r.mitre.is_empty() && ui.button("Copy MITRE").clicked() {
+                            ui.ctx().copy_text(r.mitre.clone());
                             ui.close_menu();
                         }
                     });

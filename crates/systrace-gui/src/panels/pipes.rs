@@ -12,11 +12,12 @@ struct PipeRow {
     time: Timestamp,
     action: String,
     pipe_name: String,
+    mitre: String,
 }
 
 impl PipeRow {
     fn copy_text(&self) -> String {
-        format!("{}\t{}\t{}", fmt_time(self.time), self.action, self.pipe_name)
+        format!("{}\t{}\t{}\t{}", fmt_time(self.time), self.action, self.pipe_name, self.mitre)
     }
 }
 
@@ -52,6 +53,7 @@ pub fn render_pipes(
                     time: ev.time_created,
                     action,
                     pipe_name: pipe_name.clone().unwrap_or_default(),
+                    mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                 })
             } else {
                 None
@@ -77,11 +79,12 @@ pub fn render_pipes(
         0 => rows.sort_by(|a, b| cmp_ord(a.time.cmp(&b.time), sort_asc)),
         1 => rows.sort_by(|a, b| cmp_ord(a.action.cmp(&b.action), sort_asc)),
         2 => rows.sort_by(|a, b| cmp_ord(a.pipe_name.cmp(&b.pipe_name), sort_asc)),
+        3 => rows.sort_by(|a, b| cmp_ord(a.mitre.cmp(&b.mitre), sort_asc)),
         _ => {}
     }
 
     let selected = tab.selected_row;
-    let headers = make_headers(&["Time", "Action", "Pipe Name"], &tab.sort);
+    let headers = make_headers(&["Time", "Action", "Pipe Name", "MITRE"], &tab.sort);
 
     let mut next_sort: Option<usize> = None;
     let mut next_selected = selected;
@@ -94,7 +97,8 @@ pub fn render_pipes(
             .sense(egui::Sense::click())
             .column(Column::initial(185.0).clip(true))  // Time
             .column(Column::initial(100.0).clip(true))  // Action
-            .column(Column::remainder().clip(true).at_least(200.0)) // Pipe Name
+            .column(Column::initial(200.0).clip(true))  // Pipe Name
+            .column(Column::remainder().clip(true).at_least(80.0))  // MITRE
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
@@ -112,6 +116,11 @@ pub fn render_pipes(
                     row.col(|ui| { ui.label(fmt_time(r.time)); });
                     row.col(|ui| { ui.label(&r.action); });
                     row.col(|ui| { ui.label(&r.pipe_name); });
+                    row.col(|ui| {
+                        if !r.mitre.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(220, 120, 60), &r.mitre);
+                        }
+                    });
                     let resp = row.response();
                     if resp.clicked() {
                         next_selected = Some(i);
@@ -132,6 +141,10 @@ pub fn render_pipes(
                         }
                         if ui.button("Copy Pipe Name").clicked() {
                             ui.ctx().copy_text(r.pipe_name.clone());
+                            ui.close_menu();
+                        }
+                        if !r.mitre.is_empty() && ui.button("Copy MITRE").clicked() {
+                            ui.ctx().copy_text(r.mitre.clone());
                             ui.close_menu();
                         }
                     });

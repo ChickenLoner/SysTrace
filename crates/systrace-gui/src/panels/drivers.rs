@@ -14,17 +14,19 @@ struct DriverRow {
     image_loaded: String,
     signature: String,
     signature_status: String,
+    mitre: String,
 }
 
 impl DriverRow {
     fn copy_text(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             fmt_time(self.time),
             self.kind,
             self.image_loaded,
             self.signature,
             self.signature_status,
+            self.mitre,
         )
     }
 }
@@ -59,6 +61,7 @@ pub fn render_drivers(
                         image_loaded: image_loaded.clone().unwrap_or_default(),
                         signature: signature.clone().unwrap_or_default(),
                         signature_status: signature_status.clone().unwrap_or_default(),
+                        mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                     })
                 }
                 EventDetail::ImageLoad { image_loaded, signature, signature_status, .. } => {
@@ -68,6 +71,7 @@ pub fn render_drivers(
                         image_loaded: image_loaded.clone().unwrap_or_default(),
                         signature: signature.clone().unwrap_or_default(),
                         signature_status: signature_status.clone().unwrap_or_default(),
+                        mitre: ev.mitre_technique.as_ref().map(|m| m.id.clone()).unwrap_or_default(),
                     })
                 }
                 _ => None,
@@ -95,12 +99,13 @@ pub fn render_drivers(
         2 => rows.sort_by(|a, b| cmp_ord(a.image_loaded.cmp(&b.image_loaded), sort_asc)),
         3 => rows.sort_by(|a, b| cmp_ord(a.signature.cmp(&b.signature), sort_asc)),
         4 => rows.sort_by(|a, b| cmp_ord(a.signature_status.cmp(&b.signature_status), sort_asc)),
+        5 => rows.sort_by(|a, b| cmp_ord(a.mitre.cmp(&b.mitre), sort_asc)),
         _ => {}
     }
 
     let selected = tab.selected_row;
     let headers = make_headers(
-        &["Time", "Type", "Image Loaded", "Signature", "Status"],
+        &["Time", "Type", "Image Loaded", "Signature", "Status", "MITRE"],
         &tab.sort,
     );
 
@@ -117,7 +122,8 @@ pub fn render_drivers(
             .column(Column::initial(75.0).clip(true))   // Action
             .column(Column::initial(320.0).clip(true))  // Image Loaded
             .column(Column::initial(180.0).clip(true))  // Signature
-            .column(Column::remainder().clip(true).at_least(120.0)) // Status
+            .column(Column::initial(120.0).clip(true))  // Status
+            .column(Column::remainder().clip(true).at_least(80.0))  // MITRE
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
@@ -137,6 +143,11 @@ pub fn render_drivers(
                     row.col(|ui| { ui.label(&r.image_loaded); });
                     row.col(|ui| { ui.label(&r.signature); });
                     row.col(|ui| { ui.label(&r.signature_status); });
+                    row.col(|ui| {
+                        if !r.mitre.is_empty() {
+                            ui.colored_label(egui::Color32::from_rgb(220, 120, 60), &r.mitre);
+                        }
+                    });
                     let resp = row.response();
                     if resp.clicked() {
                         next_selected = Some(i);
@@ -161,6 +172,10 @@ pub fn render_drivers(
                         }
                         if ui.button("Copy Status").clicked() {
                             ui.ctx().copy_text(r.signature_status.clone());
+                            ui.close_menu();
+                        }
+                        if !r.mitre.is_empty() && ui.button("Copy MITRE").clicked() {
+                            ui.ctx().copy_text(r.mitre.clone());
                             ui.close_menu();
                         }
                     });

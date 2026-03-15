@@ -126,11 +126,11 @@ pub fn render_timeline_table(
             .resizable(true)
             .sense(egui::Sense::click())
             .column(Column::initial(185.0).clip(true))  // Time
-            .column(Column::initial(140.0).clip(true))   // Process
-            .column(Column::initial(60.0).clip(true))    // PID
-            .column(Column::initial(65.0).clip(true))    // EventID
-            .column(Column::initial(150.0).clip(true))   // Type
-            .column(Column::remainder().clip(true).at_least(200.0)) // Details
+            .column(Column::initial(140.0).clip(true))  // Process
+            .column(Column::initial(60.0).clip(true))   // PID
+            .column(Column::initial(65.0).clip(true))   // EventID
+            .column(Column::initial(150.0).clip(true))  // Type
+            .column(Column::initial(600.0).clip(true))  // Details — wide so h-scroll kicks in
             .header(20.0, |mut header| {
                 for (i, h) in headers.iter().enumerate() {
                     header.col(|ui| {
@@ -171,6 +171,18 @@ pub fn render_timeline_table(
                         }
                         if ui.button("Copy Process").clicked() {
                             ui.ctx().copy_text(r.process_name.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy PID").clicked() {
+                            ui.ctx().copy_text(r.pid.clone());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy EventID").clicked() {
+                            ui.ctx().copy_text(r.event_id.to_string());
+                            ui.close_menu();
+                        }
+                        if ui.button("Copy Type").clicked() {
+                            ui.ctx().copy_text(r.event_type.clone());
                             ui.close_menu();
                         }
                         if ui.button("Copy Details").clicked() {

@@ -25,6 +25,11 @@ pub struct ProcessNode {
     pub hashes: Option<String>,
     pub integrity_level: Option<String>,
     pub logon_id: Option<String>,
+    pub file_version: Option<String>,
+    pub description: Option<String>,
+    pub product: Option<String>,
+    pub company: Option<String>,
+    pub original_file_name: Option<String>,
     pub computer: String,
     /// True if this node was synthesised from a child's parent fields
     /// (the parent's own ProcessCreate event was never observed).
@@ -100,6 +105,11 @@ impl ProcessTree {
                 parent_user,
                 logon_id,
                 integrity_level,
+                file_version,
+                description,
+                product,
+                company,
+                original_file_name,
                 ..
             } = &event.detail
             {
@@ -111,6 +121,11 @@ impl ProcessTree {
                 existing.parent_command_line = parent_command_line.clone();
                 existing.logon_id = logon_id.clone();
                 existing.integrity_level = integrity_level.clone();
+                existing.file_version = file_version.clone();
+                existing.description = description.clone();
+                existing.product = product.clone();
+                existing.company = company.clone();
+                existing.original_file_name = original_file_name.clone();
                 if existing.user.is_none() {
                     existing.user = parent_user.clone();
                 }
@@ -119,7 +134,8 @@ impl ProcessTree {
         } else {
             // Extract ProcessCreate-specific fields
             let (command_line, hashes, parent_process_guid, parent_process_id,
-                parent_image, parent_command_line, logon_id, integrity_level) =
+                parent_image, parent_command_line, logon_id, integrity_level,
+                file_version, description, product, company, original_file_name) =
                 if let EventDetail::ProcessCreate {
                     command_line,
                     hashes,
@@ -129,6 +145,11 @@ impl ProcessTree {
                     parent_command_line,
                     logon_id,
                     integrity_level,
+                    file_version,
+                    description,
+                    product,
+                    company,
+                    original_file_name,
                     ..
                 } = &event.detail
                 {
@@ -141,9 +162,14 @@ impl ProcessTree {
                         parent_command_line.clone(),
                         logon_id.clone(),
                         integrity_level.clone(),
+                        file_version.clone(),
+                        description.clone(),
+                        product.clone(),
+                        company.clone(),
+                        original_file_name.clone(),
                     )
                 } else {
-                    (None, None, None, None, None, None, None, None)
+                    (None, None, None, None, None, None, None, None, None, None, None, None, None)
                 };
 
             ProcessNode {
@@ -163,6 +189,11 @@ impl ProcessTree {
                 hashes,
                 integrity_level,
                 logon_id,
+                file_version,
+                description,
+                product,
+                company,
+                original_file_name,
                 computer,
                 is_synthetic: false,
             }
@@ -256,6 +287,11 @@ impl ProcessTree {
             hashes: None,
             integrity_level: None,
             logon_id: None,
+            file_version: None,
+            description: None,
+            product: None,
+            company: None,
+            original_file_name: None,
             computer,
             is_synthetic: true,
         };
