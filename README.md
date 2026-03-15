@@ -1,5 +1,7 @@
 # SysTrace
 
+![Banner](assets/Banner.jpg)
+
 A fast, native GUI forensic analysis tool for **Sysmon** logs. Parses EVTXECmd NDJSON exports and presents them as an interactive process tree with process-centric telemetry browsing — built for DFIR investigators.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
@@ -26,7 +28,35 @@ A fast, native GUI forensic analysis tool for **Sysmon** logs. Parses EVTXECmd N
 
 ## Screenshots
 
-> *Load an EVTXECmd NDJSON export, explore the process tree, and drill into any process's network connections, file writes, registry changes, injections, and more — all in one window.*
+### Process Tree & Overview
+
+![Process Tree and Overview](assets/program1_processtree.png)
+
+Browse the full process hierarchy on the left. Select any process to see its metadata, file hashes, command line, parent info, and a per-category event activity summary on the right.
+
+### Filter Panel
+
+![Filter Panel](assets/program2_filter.png)
+
+Click **Filter** in the toolbar to expand the filter panel. Filter by Integrity Level, User, Activity type, and MITRE techniques simultaneously. The badge (e.g. `Filter (1)`) shows how many categories are active. Click **✕** to clear all filters at once.
+
+### Cross-Process Timeline
+
+![Timeline](assets/program3_timeline.png)
+
+Select multiple processes using checkboxes, then click **Generate Timeline** to produce a unified, time-sorted event table across all selected processes. Filter rows by keyword in the search bar above the table.
+
+### Statistics
+
+![Statistics](assets/program4_stats.png)
+
+Open **Stats** from the menu bar for a summary of the loaded dataset — total events, processes, event types, and duration — plus bar charts breaking down activity by integrity level, user, and event type.
+
+### Help & Color Guide
+
+![Help](assets/program5_help.png)
+
+The **Help** menu (or press `F1`) opens a reference window with three tabs: Color Guide (process tree and panel color meanings), Keyboard Shortcuts, and Feature Guide.
 
 ---
 

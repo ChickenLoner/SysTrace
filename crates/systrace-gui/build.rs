@@ -1,10 +1,8 @@
+// On non-Windows hosts the build script does nothing.
+// The ico/image/winresource crates are only declared as build-dependencies
+// for Windows targets, so we must gate the code the same way.
+#[cfg(target_os = "windows")]
 fn main() {
-    // Only needed when compiling for Windows.
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os != "windows" {
-        return;
-    }
-
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let ico_path = std::path::Path::new(&out_dir).join("icon.ico");
 
@@ -30,3 +28,6 @@ fn main() {
 
     println!("cargo:rerun-if-changed=../../icon.png");
 }
+
+#[cfg(not(target_os = "windows"))]
+fn main() {}
