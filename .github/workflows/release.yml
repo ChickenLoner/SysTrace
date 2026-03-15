@@ -78,23 +78,26 @@ jobs:
           path: systrace-windows-x86_64.exe
 
   # ── macOS Intel (x86_64) ────────────────────────────────────────────────────
+  # macos-13 is deprecated. Cross-compile x86_64 from the ARM runner instead.
   build-macos-intel:
     name: macOS (x86_64 Intel)
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Install Rust stable + x86_64 target
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
 
       - name: Cache Cargo registry
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release
-        run: cargo build --release -p systrace-gui
+      - name: Build release (x86_64)
+        run: cargo build --release -p systrace-gui --target x86_64-apple-darwin
 
       - name: Package binary
-        run: cp target/release/systrace-gui systrace-macos-x86_64
+        run: cp target/x86_64-apple-darwin/release/systrace-gui systrace-macos-x86_64
 
       - uses: actions/upload-artifact@v4
         with:
