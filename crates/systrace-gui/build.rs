@@ -24,6 +24,17 @@ fn main() {
     // Embed into the Windows PE binary.
     let mut res = winresource::WindowsResource::new();
     res.set_icon(ico_path.to_str().unwrap());
+
+    // PE version metadata — shown in Windows file properties / AV/EDR context
+    res.set("FileDescription",      "SysTrace — Sysmon Forensic Analysis Tool");
+    res.set("ProductName",          "SysTrace");
+    res.set("CompanyName",          "Warawut Manosong (Chicken0248)");
+    res.set("LegalCopyright",       "Copyright © 2026 Warawut Manosong (Chicken0248)");
+    res.set("InternalName",         "systrace-gui.exe");
+    res.set("OriginalFilename",     "systrace-gui.exe");
+    res.set("FileVersion",          "1.1.0.0");
+    res.set("ProductVersion",       "1.1.0.0");
+
     res.compile().expect("failed to compile Windows resources");
 
     println!("cargo:rerun-if-changed=../../icon.png");

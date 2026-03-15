@@ -1,7 +1,12 @@
 [package]
 name = "systrace-gui"
-version = "0.1.0"
+version = "1.1.0"
 edition = "2021"
+authors = ["Warawut Manosong (Chicken0248)"]
+description = "SysTrace — Sysmon forensic analysis tool for DFIR investigators"
+homepage = "https://github.com/ChickenLoner/SysTrace"
+repository = "https://github.com/ChickenLoner/SysTrace"
+license = "MIT"
 
 [[bin]]
 name = "systrace-gui"
