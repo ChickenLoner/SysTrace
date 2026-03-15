@@ -35,6 +35,16 @@ impl SpecialFilter {
         self.integrity_system || self.integrity_high
             || self.integrity_medium || self.integrity_low
     }
+
+    /// Count of active filter categories (each category counts as 1).
+    pub fn active_category_count(&self) -> usize {
+        let mut n = 0;
+        if self.any_integrity_active() { n += 1; }
+        if !self.users_checked.is_empty() { n += 1; }
+        if self.network { n += 1; }
+        if self.persistence { n += 1; }
+        n
+    }
 }
 
 /// Which tab is active in the Help window.
@@ -109,6 +119,8 @@ pub struct AppState {
     pub available_mitre: BTreeSet<String>,
     /// MITRE technique IDs whose checkboxes are active (filter: show processes with these techniques).
     pub mitre_filter: HashSet<String>,
+    /// Whether the filter panel is expanded in the sidebar.
+    pub show_filters: bool,
     /// Whether the Stats popup is open.
     pub show_stats: bool,
     /// Whether the Help window is open.
@@ -171,6 +183,7 @@ impl Default for AppState {
             persistence_processes: HashSet::new(),
             available_mitre: BTreeSet::new(),
             mitre_filter: HashSet::new(),
+            show_filters: false,
             show_stats: false,
             show_help: false,
             help_tab: HelpTab::default(),

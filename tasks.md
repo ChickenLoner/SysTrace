@@ -106,7 +106,7 @@ Add "Stats" button in menu bar → floating popup with statistics that update ba
 
 ---
 
-## Task 7: Replace Event Type Filter with Special Filter
+## Task 7: Replace Event Type Filter with Special Filter + Unified Filter Toggle
 **Status:** [x] Done
 
 Remove current `TreeEventFilter` (6 event type checkboxes). Replace with forensic-focused filters.
@@ -145,6 +145,7 @@ Remove current `TreeEventFilter` (6 event type checkboxes). Replace with forensi
 - [x] Replace filter UI rendering with 4 collapsing sections
 - [x] Rewrite `node_passes_event_filter()` with new logic
 - [x] Remove old `TreeEventFilter`
+- [x] Unified Filter toggle button — replaces 4 bare collapsing headers with a single "Filter" toggle; shows active count badge (e.g. "Filter (2)"); all filter categories appear inside when toggled open; "Clear All" on same row
 
 ---
 

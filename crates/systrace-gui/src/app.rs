@@ -55,8 +55,74 @@ impl Default for SysTraceApp {
     }
 }
 
+/// Draw a horizontal bar chart for stats sections.
+/// A small metric card: coloured big number + muted label below.
+fn stat_card(ui: &mut egui::Ui, value: &str, label: &str, color: egui::Color32) {
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(8, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(value).strong().size(22.0).color(color));
+                ui.label(egui::RichText::new(label).small().color(ui.visuals().weak_text_color()));
+            });
+        });
+}
+
+/// `items`: (label, count, bar_color). `total`: denominator for %.
+fn stats_bar_chart(ui: &mut egui::Ui, items: &[(String, usize, egui::Color32)], total: usize) {
+    if items.is_empty() { return; }
+    let bar_h   = 18.0;
+    let gap     = 2.0;
+    let label_w = 160.0;
+    let count_w = 90.0;
+    let bar_max = 160.0_f32; // fixed width — keeps layout compact
+
+    for (label, count, color) in items {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [label_w, bar_h],
+                egui::Label::new(egui::RichText::new(label).small()).truncate(),
+            );
+            let pct = if total > 0 { *count as f32 / total as f32 } else { 0.0 };
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(bar_max, bar_h - gap * 2.0),
+                egui::Sense::hover(),
+            );
+            let rounding = egui::CornerRadius::same(3);
+            ui.painter().rect_filled(rect, rounding, ui.visuals().faint_bg_color);
+            let fill_w = (pct * bar_max).max(if *count > 0 { 3.0 } else { 0.0 });
+            let fill = egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, rect.height()));
+            ui.painter().rect_filled(fill, rounding, *color);
+            ui.add_sized(
+                [count_w, bar_h],
+                egui::Label::new(
+                    egui::RichText::new(format!("{count}  {:.1}%", pct * 100.0)).small(),
+                ),
+            );
+        });
+    }
+}
+
 impl SysTraceApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Load Windows symbol/emoji fonts as fallbacks so ✕ ⚑ 🔍 🔖 ⚠ render correctly.
+        let mut fonts = egui::FontDefinitions::default();
+        for (name, path) in [
+            ("seguisym",  "C:/Windows/Fonts/seguisym.ttf"),
+            ("seguiemj",  "C:/Windows/Fonts/seguiemj.ttf"),
+        ] {
+            if let Ok(data) = std::fs::read(path) {
+                fonts.font_data.insert(name.to_owned(), egui::FontData::from_owned(data).into());
+                fonts.families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .push(name.to_owned());
+            }
+        }
+        cc.egui_ctx.set_fonts(fonts);
         Self::default()
     }
 
@@ -302,9 +368,10 @@ impl SysTraceApp {
         }
         self.state.persistence_processes = persistence_processes;
 
-        // Available users from process nodes (sorted).
+        // Available users from real (non-synthetic) process nodes (sorted).
         let mut user_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for node in self.state.process_tree.nodes.values() {
+            if node.is_synthetic { continue; }
             if let Some(ref user) = node.user {
                 user_set.insert(user.clone());
             }
@@ -530,6 +597,19 @@ impl SysTraceApp {
             cs.set_open(open);
             cs.store(ctx);
         }
+    }
+
+    /// Returns true if this node OR any descendant passes the event/special filter.
+    /// Allows ancestor nodes to remain visible when a child matches the filter.
+    fn subtree_passes_event_filter(&self, guid: ProcessGuid) -> bool {
+        if self.node_passes_event_filter(&guid) {
+            return true;
+        }
+        let Some(node) = self.state.process_tree.get(&guid) else {
+            return false;
+        };
+        let children = node.children.clone();
+        children.iter().any(|&c| self.subtree_passes_event_filter(c))
     }
 
     /// Returns true if any node in the subtree rooted at `guid` matches the filter.
@@ -872,109 +952,126 @@ impl SysTraceApp {
                     self.state.timeline_event_filter.clear();
                 }
             });
-        } else {
-            // Normal mode: forensic-focused SpecialFilter UI
-
-            // ── Integrity Level ───────────────────────────────────────────
-            egui::CollapsingHeader::new("Integrity Level")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.checkbox(&mut self.state.special_filter.integrity_system, "System");
-                    ui.checkbox(&mut self.state.special_filter.integrity_high,   "High");
-                    ui.checkbox(&mut self.state.special_filter.integrity_medium, "Medium");
-                    ui.checkbox(&mut self.state.special_filter.integrity_low,    "Low");
-                    if self.state.special_filter.any_integrity_active()
-                        && ui.small_button("Clear").clicked()
-                    {
-                        self.state.special_filter.integrity_system = false;
-                        self.state.special_filter.integrity_high   = false;
-                        self.state.special_filter.integrity_medium = false;
-                        self.state.special_filter.integrity_low    = false;
-                    }
-                });
-
-            // ── User ──────────────────────────────────────────────────────
-            if !self.state.available_users.is_empty() {
-                let users: Vec<String> = self.state.available_users.clone();
-                egui::CollapsingHeader::new("User")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        for user in &users {
-                            let mut checked = self.state.special_filter.users_checked.contains(user);
-                            if ui.checkbox(&mut checked, user.as_str()).changed() {
-                                if checked {
-                                    self.state.special_filter.users_checked.insert(user.clone());
-                                } else {
-                                    self.state.special_filter.users_checked.remove(user);
-                                }
-                            }
-                        }
-                        if !self.state.special_filter.users_checked.is_empty()
-                            && ui.small_button("Clear").clicked()
-                        {
-                            self.state.special_filter.users_checked.clear();
-                        }
-                    });
-            }
-
-            // ── Activity ──────────────────────────────────────────────────
-            egui::CollapsingHeader::new("Activity")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.checkbox(&mut self.state.special_filter.network,     "Network Connection");
-                    ui.checkbox(&mut self.state.special_filter.persistence, "Persistence Activity");
-                    if (self.state.special_filter.network || self.state.special_filter.persistence)
-                        && ui.small_button("Clear").clicked()
-                    {
-                        self.state.special_filter.network     = false;
-                        self.state.special_filter.persistence = false;
-                    }
-                });
-
-            // ── MITRE Techniques ──────────────────────────────────────────
-            if !self.state.available_mitre.is_empty() {
-                let mitre_ids: Vec<String> = self.state.available_mitre.iter().cloned().collect();
-                egui::CollapsingHeader::new("MITRE Techniques")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        for id in &mitre_ids {
-                            let mut checked = self.state.mitre_filter.contains(id);
-                            if ui.checkbox(&mut checked, id.as_str()).changed() {
-                                if checked {
-                                    self.state.mitre_filter.insert(id.clone());
-                                } else {
-                                    self.state.mitre_filter.remove(id);
-                                }
-                            }
-                        }
-                        if !self.state.mitre_filter.is_empty()
-                            && ui.small_button("Clear All").clicked()
-                        {
-                            self.state.mitre_filter.clear();
-                        }
-                    });
-            }
-
-            // Clear all filters button
-            if self.state.special_filter.any_active() || !self.state.mitre_filter.is_empty() {
-                if ui.small_button("Clear All Filters").clicked() {
-                    self.state.special_filter = SpecialFilter::default();
-                    self.state.mitre_filter.clear();
-                }
-            }
         }
 
         ui.separator();
 
-        // Expand All / Collapse All buttons
-        ui.horizontal(|ui| {
-            if ui.small_button("Expand All").clicked() {
-                self.set_all_tree_open(ui.ctx(), true);
+        // ── Toolbar row: Expand All / Collapse All / Filter toggle ───────────
+        {
+            let sf_count = self.state.special_filter.active_category_count();
+            let mitre_count = if self.state.mitre_filter.is_empty() { 0 } else { 1 };
+            let total_active = sf_count + mitre_count;
+            let any_active = total_active > 0;
+
+            ui.horizontal(|ui| {
+                if ui.small_button("Expand All").clicked() {
+                    self.set_all_tree_open(ui.ctx(), true);
+                }
+                if ui.small_button("Collapse All").clicked() {
+                    self.set_all_tree_open(ui.ctx(), false);
+                }
+                let label = if total_active > 0 {
+                    format!("Filter ({})", total_active)
+                } else {
+                    "Filter".to_string()
+                };
+                let mut btn = egui::Button::new(label);
+                if self.state.show_filters || any_active {
+                    btn = btn.fill(ui.visuals().selection.bg_fill);
+                }
+                if ui.add(btn).clicked() {
+                    self.state.show_filters = !self.state.show_filters;
+                }
+                if any_active && ui.small_button("✕").clicked() {
+                    self.state.special_filter = SpecialFilter::default();
+                    self.state.mitre_filter.clear();
+                }
+            });
+
+            if self.state.show_filters {
+                ui.indent("filter_panel", |ui| {
+                    // ── Integrity Level ───────────────────────────────────
+                    egui::CollapsingHeader::new("Integrity Level")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.checkbox(&mut self.state.special_filter.integrity_system, "System");
+                            ui.checkbox(&mut self.state.special_filter.integrity_high,   "High");
+                            ui.checkbox(&mut self.state.special_filter.integrity_medium, "Medium");
+                            ui.checkbox(&mut self.state.special_filter.integrity_low,    "Low");
+                            if self.state.special_filter.any_integrity_active()
+                                && ui.small_button("Clear").clicked()
+                            {
+                                self.state.special_filter.integrity_system = false;
+                                self.state.special_filter.integrity_high   = false;
+                                self.state.special_filter.integrity_medium = false;
+                                self.state.special_filter.integrity_low    = false;
+                            }
+                        });
+
+                    // ── User ──────────────────────────────────────────────
+                    if !self.state.available_users.is_empty() {
+                        let users: Vec<String> = self.state.available_users.clone();
+                        egui::CollapsingHeader::new("User")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for user in &users {
+                                    let mut checked = self.state.special_filter.users_checked.contains(user);
+                                    if ui.checkbox(&mut checked, user.as_str()).changed() {
+                                        if checked {
+                                            self.state.special_filter.users_checked.insert(user.clone());
+                                        } else {
+                                            self.state.special_filter.users_checked.remove(user);
+                                        }
+                                    }
+                                }
+                                if !self.state.special_filter.users_checked.is_empty()
+                                    && ui.small_button("Clear").clicked()
+                                {
+                                    self.state.special_filter.users_checked.clear();
+                                }
+                            });
+                    }
+
+                    // ── Activity ──────────────────────────────────────────
+                    egui::CollapsingHeader::new("Activity")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.checkbox(&mut self.state.special_filter.network,     "Network Connection");
+                            ui.checkbox(&mut self.state.special_filter.persistence, "Persistence Activity");
+                            if (self.state.special_filter.network || self.state.special_filter.persistence)
+                                && ui.small_button("Clear").clicked()
+                            {
+                                self.state.special_filter.network     = false;
+                                self.state.special_filter.persistence = false;
+                            }
+                        });
+
+                    // ── MITRE Techniques ──────────────────────────────────
+                    if !self.state.available_mitre.is_empty() {
+                        let mitre_ids: Vec<String> = self.state.available_mitre.iter().cloned().collect();
+                        egui::CollapsingHeader::new("MITRE Techniques")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for id in &mitre_ids {
+                                    let mut checked = self.state.mitre_filter.contains(id);
+                                    if ui.checkbox(&mut checked, id.as_str()).changed() {
+                                        if checked {
+                                            self.state.mitre_filter.insert(id.clone());
+                                        } else {
+                                            self.state.mitre_filter.remove(id);
+                                        }
+                                    }
+                                }
+                                if !self.state.mitre_filter.is_empty()
+                                    && ui.small_button("Clear All").clicked()
+                                {
+                                    self.state.mitre_filter.clear();
+                                }
+                            });
+                    }
+                });
             }
-            if ui.small_button("Collapse All").clicked() {
-                self.set_all_tree_open(ui.ctx(), false);
-            }
-        });
+        }
 
         ui.separator();
 
@@ -1086,8 +1183,16 @@ impl SysTraceApp {
             return;
         }
 
-        // Event type filter
+        // Event type filter — guard: skip entire subtree if nothing in it passes
+        if !self.subtree_passes_event_filter(guid) {
+            return;
+        }
+        // If this node itself fails the filter, skip its row but still recurse into children
+        // so that deeply nested matching processes remain reachable.
         if !self.node_passes_event_filter(&guid) {
+            for child in children {
+                self.render_tree_node(ui, child);
+            }
             return;
         }
 
@@ -1681,15 +1786,15 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn render_stats_window(&mut self, ctx: &egui::Context) {
-        use crate::panels::event_label;
+        use crate::panels::{event_color, event_label};
 
         let mut open = self.state.show_stats;
 
         egui::Window::new("Statistics")
             .open(&mut open)
             .resizable(true)
-            .default_width(540.0)
-            .default_height(500.0)
+            .default_width(460.0)
+            .default_height(560.0)
             .show(ctx, |ui| {
                 let rodeo = self.state.rodeo.clone();
 
@@ -1748,124 +1853,114 @@ impl SysTraceApp {
                             continue;
                         }
                     }
-                    let user = node.user.as_deref().unwrap_or("(unknown)").to_owned();
-                    *user_counts.entry(user).or_insert(0) += 1;
-                    let il = node.integrity_level.as_deref().unwrap_or("(unknown)").to_owned();
-                    *integrity_counts.entry(il).or_insert(0) += 1;
+                    if !node.is_synthetic {
+                        let user = node.user.as_deref().unwrap_or("(unknown)").to_owned();
+                        *user_counts.entry(user).or_insert(0) += 1;
+                        let il = node.integrity_level.as_deref().unwrap_or("(unknown)").to_owned();
+                        *integrity_counts.entry(il).or_insert(0) += 1;
+                    }
                 }
 
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-                    // ── Summary ───────────────────────────────────────────
-                    ui.strong("Summary");
-                    ui.add_space(4.0);
-                    egui::Grid::new("stats_summary")
-                        .num_columns(2)
-                        .striped(true)
-                        .min_col_width(160.0)
-                        .show(ui, |ui| {
-                            ui.label("Total events");
-                            if host_filter.is_some() {
-                                ui.label(format!("{filtered_count} / {total_events}"));
-                            } else {
-                                ui.label(format!("{total_events}"));
-                            }
-                            ui.end_row();
+                    // ── Summary cards ─────────────────────────────────────
+                    let proc_count = if host_filter.is_some() {
+                        user_counts.values().sum::<usize>()
+                    } else {
+                        self.state.process_tree.nodes.values()
+                            .filter(|n| !n.is_synthetic).count()
+                    };
+                    let event_types_seen = event_id_counts.len();
 
-                            ui.label("Processes (tree nodes)");
-                            let proc_count = if host_filter.is_some() {
-                                user_counts.values().sum::<usize>()
-                            } else {
-                                self.state.process_tree.nodes.len()
-                            };
-                            ui.label(format!("{proc_count}"));
-                            ui.end_row();
+                    let accent   = ui.visuals().selection.bg_fill;
+                    let clr_proc = egui::Color32::from_rgb(60, 180, 100);
+                    let clr_type = egui::Color32::from_rgb(210, 140, 40);
+                    let clr_dur  = egui::Color32::from_rgb(120, 160, 220);
 
-                            ui.label("Host filter");
-                            ui.label(host_filter.unwrap_or("All hosts"));
-                            ui.end_row();
+                    // Row 1: 3 metric cards
+                    ui.columns(3, |cols| {
+                        stat_card(&mut cols[0], &format!("{filtered_count}"), "Events", accent);
+                        stat_card(&mut cols[1], &format!("{proc_count}"), "Processes", clr_proc);
+                        stat_card(&mut cols[2], &format!("{event_types_seen}"), "Event Types", clr_type);
+                    });
 
-                            if let Some((t_min, t_max)) = time_range {
-                                ui.label("First event");
-                                ui.label(t_min.format("%Y-%m-%d %H:%M:%S UTC").to_string());
-                                ui.end_row();
-                                ui.label("Last event");
-                                ui.label(t_max.format("%Y-%m-%d %H:%M:%S UTC").to_string());
-                                ui.end_row();
-                                let duration = t_max - t_min;
-                                let total_secs = duration.num_seconds().abs();
-                                let h = total_secs / 3600;
-                                let m = (total_secs % 3600) / 60;
-                                let s = total_secs % 60;
-                                ui.label("Duration");
-                                ui.label(format!("{h}h {m}m {s}s"));
-                                ui.end_row();
-                            }
+                    ui.add_space(6.0);
+
+                    // Row 2: duration + host
+                    if let Some((t_min, t_max)) = time_range {
+                        let duration   = t_max - t_min;
+                        let total_secs = duration.num_seconds().abs();
+                        let h = total_secs / 3600;
+                        let m = (total_secs % 3600) / 60;
+                        let s = total_secs % 60;
+                        let dur_str = if h > 0 { format!("{h}h {m}m {s}s") }
+                                      else if m > 0 { format!("{m}m {s}s") }
+                                      else { format!("{s}s") };
+
+                        ui.columns(2, |cols| {
+                            stat_card(&mut cols[0], &dur_str, "Duration", clr_dur);
+                            stat_card(&mut cols[1], host_filter.unwrap_or("All"), "Host", egui::Color32::GRAY);
                         });
 
-                    ui.add_space(10.0);
+                        ui.add_space(6.0);
 
-                    // ── Per-EventID breakdown ─────────────────────────────
-                    ui.strong("Event Type Breakdown");
-                    ui.add_space(4.0);
-                    egui::Grid::new("stats_event_ids")
-                        .num_columns(4)
-                        .striped(true)
-                        .min_col_width(60.0)
-                        .show(ui, |ui| {
-                            ui.strong("EventID");
-                            ui.strong("Name");
-                            ui.strong("Count");
-                            ui.strong("%");
-                            ui.end_row();
-
-                            for (eid, count) in &event_id_counts {
-                                ui.label(eid.to_string());
-                                ui.label(event_label(*eid));
-                                ui.label(count.to_string());
-                                let pct = if filtered_count > 0 {
-                                    (*count as f64 / filtered_count as f64) * 100.0
-                                } else {
-                                    0.0
-                                };
-                                ui.label(format!("{pct:.1}%"));
-                                ui.end_row();
-                            }
+                        // Time range banner
+                        egui::Frame::new()
+                            .fill(ui.visuals().faint_bg_color)
+                            .corner_radius(egui::CornerRadius::same(4))
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(
+                                        t_min.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                                    ).small().color(ui.visuals().weak_text_color()));
+                                    ui.label(egui::RichText::new("→").small());
+                                    ui.label(egui::RichText::new(
+                                        t_max.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                                    ).small().color(ui.visuals().weak_text_color()));
+                                });
+                            });
+                    } else {
+                        ui.columns(1, |cols| {
+                            stat_card(&mut cols[0], host_filter.unwrap_or("All"), "Host", egui::Color32::GRAY);
                         });
+                    }
 
-                    ui.add_space(10.0);
+                    ui.add_space(12.0);
 
                     // ── Integrity distribution ────────────────────────────
-                    ui.strong("Integrity Level Distribution (Processes)");
+                    ui.strong("Integrity Level (Processes)");
                     ui.add_space(4.0);
                     if integrity_counts.is_empty() {
                         ui.label("No process data loaded.");
                     } else {
                         let total_procs: usize = integrity_counts.values().sum();
-                        egui::Grid::new("stats_integrity")
-                            .num_columns(3)
-                            .striped(true)
-                            .min_col_width(100.0)
-                            .show(ui, |ui| {
-                                ui.strong("Integrity Level");
-                                ui.strong("Count");
-                                ui.strong("%");
-                                ui.end_row();
-
-                                for (il, count) in &integrity_counts {
-                                    ui.label(il.as_str());
-                                    ui.label(count.to_string());
-                                    let pct = if total_procs > 0 {
-                                        (*count as f64 / total_procs as f64) * 100.0
-                                    } else {
-                                        0.0
-                                    };
-                                    ui.label(format!("{pct:.1}%"));
-                                    ui.end_row();
-                                }
-                            });
+                        // Order: System, High, Medium, Low, then others
+                        let order = ["system","high","medium","low"];
+                        let mut items: Vec<(String, usize, egui::Color32)> = order.iter()
+                            .filter_map(|k| {
+                                integrity_counts.iter()
+                                    .find(|(il, _)| il.to_lowercase() == *k)
+                                    .map(|(il, &c)| {
+                                        let color = match il.to_lowercase().as_str() {
+                                            "system" => egui::Color32::from_rgb(200, 60, 60),
+                                            "high"   => egui::Color32::from_rgb(210, 120, 40),
+                                            "medium" => egui::Color32::from_rgb(180, 180, 50),
+                                            _        => egui::Color32::from_rgb(60, 180, 80),
+                                        };
+                                        (il.clone(), c, color)
+                                    })
+                            })
+                            .collect();
+                        // Append any unlisted integrity levels
+                        for (il, &c) in &integrity_counts {
+                            if !order.iter().any(|k| il.to_lowercase() == *k) {
+                                items.push((il.clone(), c, egui::Color32::GRAY));
+                            }
+                        }
+                        stats_bar_chart(ui, &items, total_procs);
                     }
 
-                    ui.add_space(10.0);
+                    ui.add_space(12.0);
 
                     // ── Per-user process count ────────────────────────────
                     ui.strong("Processes per User");
@@ -1874,63 +1969,60 @@ impl SysTraceApp {
                         ui.label("No process data loaded.");
                     } else {
                         let total_procs: usize = user_counts.values().sum();
-                        egui::Grid::new("stats_users")
-                            .num_columns(3)
-                            .striped(true)
-                            .min_col_width(160.0)
-                            .show(ui, |ui| {
-                                ui.strong("User");
-                                ui.strong("Processes");
-                                ui.strong("%");
-                                ui.end_row();
-
-                                // Sort by count descending
-                                let mut user_vec: Vec<(&String, &usize)> = user_counts.iter().collect();
-                                user_vec.sort_by(|a, b| b.1.cmp(a.1));
-                                for (user, count) in user_vec {
-                                    ui.label(user.as_str());
-                                    ui.label(count.to_string());
-                                    let pct = if total_procs > 0 {
-                                        (*count as f64 / total_procs as f64) * 100.0
-                                    } else {
-                                        0.0
-                                    };
-                                    ui.label(format!("{pct:.1}%"));
-                                    ui.end_row();
-                                }
-                            });
+                        let palette: &[egui::Color32] = &[
+                            egui::Color32::from_rgb(86, 180, 233),
+                            egui::Color32::from_rgb(230, 159, 0),
+                            egui::Color32::from_rgb(0, 158, 115),
+                            egui::Color32::from_rgb(240, 228, 66),
+                            egui::Color32::from_rgb(0, 114, 178),
+                            egui::Color32::from_rgb(213, 94, 0),
+                            egui::Color32::from_rgb(204, 121, 167),
+                        ];
+                        let mut user_vec: Vec<(&String, usize)> = user_counts.iter()
+                            .map(|(u, &c)| (u, c)).collect();
+                        user_vec.sort_by(|a, b| b.1.cmp(&a.1));
+                        let items: Vec<(String, usize, egui::Color32)> = user_vec.iter()
+                            .take(12)
+                            .enumerate()
+                            .map(|(i, (u, c))| (u.to_string(), *c, palette[i % palette.len()]))
+                            .collect();
+                        stats_bar_chart(ui, &items, total_procs);
                     }
 
-                    ui.add_space(10.0);
+                    ui.add_space(12.0);
+
+                    // ── Per-EventID breakdown ─────────────────────────────
+                    ui.strong("Event Type Breakdown");
+                    ui.add_space(4.0);
+                    if !event_id_counts.is_empty() {
+                        let mut ev_vec: Vec<(u16, usize)> = event_id_counts.iter()
+                            .map(|(&id, &c)| (id, c)).collect();
+                        ev_vec.sort_by(|a, b| b.1.cmp(&a.1));
+                        let items: Vec<(String, usize, egui::Color32)> = ev_vec.iter()
+                            .take(20)
+                            .map(|(id, c)| {
+                                let label = format!("{} — {}", id, event_label(*id));
+                                (*c, label, event_color(*id))
+                            })
+                            .map(|(c, l, col)| (l, c, col))
+                            .collect();
+                        stats_bar_chart(ui, &items, filtered_count);
+                    }
+
+                    ui.add_space(12.0);
 
                     // ── Host breakdown ────────────────────────────────────
                     if host_counts.len() > 1 {
                         ui.strong("Host / Computer Breakdown");
                         ui.add_space(4.0);
-                        egui::Grid::new("stats_hosts")
-                            .num_columns(3)
-                            .striped(true)
-                            .min_col_width(160.0)
-                            .show(ui, |ui| {
-                                ui.strong("Computer");
-                                ui.strong("Events");
-                                ui.strong("%");
-                                ui.end_row();
-
-                                let mut host_vec: Vec<(&String, &usize)> = host_counts.iter().collect();
-                                host_vec.sort_by(|a, b| b.1.cmp(a.1));
-                                for (computer, count) in host_vec {
-                                    ui.label(computer.as_str());
-                                    ui.label(count.to_string());
-                                    let pct = if total_events > 0 {
-                                        (*count as f64 / total_events as f64) * 100.0
-                                    } else {
-                                        0.0
-                                    };
-                                    ui.label(format!("{pct:.1}%"));
-                                    ui.end_row();
-                                }
-                            });
+                        let accent = ui.visuals().selection.bg_fill;
+                        let mut host_vec: Vec<(&String, usize)> = host_counts.iter()
+                            .map(|(h, &c)| (h, c)).collect();
+                        host_vec.sort_by(|a, b| b.1.cmp(&a.1));
+                        let items: Vec<(String, usize, egui::Color32)> = host_vec.iter()
+                            .map(|(h, c)| (h.to_string(), *c, accent))
+                            .collect();
+                        stats_bar_chart(ui, &items, total_events);
                     }
                 });
             });
@@ -2058,21 +2150,35 @@ impl SysTraceApp {
         };
 
         section(ui, "Process Tree (left panel)",
-            "Shows all processes from Sysmon EventId 1. Click a node to select it and view its \
-             telemetry. Use the search box to filter by name, PID, user, or command line. \
-             Expand All / Collapse All control the tree depth. Event Type Filter and MITRE \
-             Techniques filters narrow the tree to processes with matching events.");
+            "Shows all processes from Sysmon EventId 1. Click a node to select it and view \
+             its telemetry. Use the search box (🔍) to filter by name, PID, user, or command \
+             line. Expand All / Collapse All and the Filter toggle are in the toolbar row below \
+             the search box. The Filter panel is always accessible, including while in Timeline mode. \
+             ⚑ prefix = process has at least one MITRE-tagged event. 🔖 prefix = bookmarked.");
+
+        section(ui, "Filter panel",
+            "Click the Filter button in the toolbar to expand forensic filters. All categories \
+             are AND logic — a process must satisfy every active category to appear.\n\
+             • Integrity Level — System / High / Medium / Low checkboxes.\n\
+             • User — checkbox per unique user found in real (non-synthetic) ProcessCreate events.\n\
+             • Activity — Network Connection (has EventId 3/22) or Persistence Activity \
+             (touches Run keys, Services, Task Scheduler, WMI, Winlogon, AppInit_DLLs, \
+             or is schtasks.exe / at.exe).\n\
+             • MITRE Techniques — checkbox per technique ID found in loaded events.\n\
+             The badge on the button (e.g. \"Filter (2)\") shows how many categories are active. \
+             Click ✕ to clear all at once. Parent nodes without matching events are skipped \
+             but their children are still shown if they match.");
 
         section(ui, "Overview tab",
-            "Shows process metadata (image path, PID, GUID, command line, user, integrity, \
-             hashes, parent). Below that: per-category event counts. If any events carry \
-             MITRE ATT&CK annotations they appear in the MITRE ATT&CK section. \
-             The Notes field lets you attach investigation notes to a process.");
+            "Shows process metadata: image path, PID, GUID, command line, user, integrity, \
+             hashes, parent, file version, description, product, company. Below that: \
+             per-category event counts. MITRE ATT&CK annotations appear if present. \
+             The Notes field lets you attach investigation notes (bookmarks) to a process.");
 
         section(ui, "Network tab",
             "EventId 3 (NetworkConnect) and 22 (DnsQuery) for the selected process. \
-             Columns: Time, Direction (Outbound/Inbound/DNS), Protocol, Source, Destination, \
-             Hostname, MITRE.");
+             Columns: Time, Direction, Protocol, Source, Destination, Hostname, MITRE. \
+             Right-click any row to copy individual fields or the full row.");
 
         section(ui, "Files tab",
             "File system events: EventId 11 (Create), 15 (ADS Stream), 23/26 (Delete), \
@@ -2098,16 +2204,21 @@ impl SysTraceApp {
         section(ui, "Detection tab",
             "Suspicious events not shown elsewhere: EventId 2 (FileCreateTime/timestomp), \
              4 (SysmonState), 9 (RawAccessRead), 16 (ConfigChange), 19-21 (WMI), \
-             24 (ClipboardChange). Color-coded by category with legend.");
+             24 (ClipboardChange). Color-coded by category with a legend bar at the top.");
 
         section(ui, "Timeline tab",
-            "Cross-process event timeline. Check processes in the tree, then click \
-             Generate Timeline to see all their events sorted by time in one table.");
+            "Cross-process event timeline. Check processes in the tree (checkboxes appear \
+             on the left when this tab is active), then click Generate Timeline to see all \
+             their events sorted by time in one table. Supports horizontal scrolling and \
+             right-click copy per column. The Filter panel remains available in the sidebar \
+             to narrow which processes appear in the tree before selecting.");
 
-        section(ui, "Filters",
-            "Event Type Filter: show only processes with selected event categories. \
-             MITRE Techniques: show only processes whose events are tagged with selected \
-             technique IDs. Both filters are OR within a category and AND across categories.");
+        section(ui, "Stats popup (menu bar)",
+            "Click Stats in the menu bar for a summary of the loaded file. Shows metric \
+             cards (event count, process count, event types seen, duration, time range) \
+             and horizontal bar charts for: Integrity Level distribution, Processes per User \
+             (top 12), Event Type Breakdown (top 20), and Host breakdown (if multi-host). \
+             Stats respect the current host filter.");
 
         section(ui, "Export (File menu)",
             "Events as CSV — all events with time, EventID, type, computer, image, user. \
