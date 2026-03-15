@@ -570,6 +570,37 @@ pub fn parse_file(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Auto-detecting parser — dispatches to EVTX or NDJSON based on file magic
+// ---------------------------------------------------------------------------
+
+/// Parse a Sysmon log file, auto-detecting format by magic bytes.
+///
+/// - First 8 bytes == `ElfFile\0` → native EVTX binary parser
+/// - Otherwise → existing EVTXECmd NDJSON parser
+pub fn parse_file_auto(
+    path: &Path,
+    sender: &crossbeam_channel::Sender<Vec<SysmonEvent>>,
+    bytes_read: &Arc<AtomicU64>,
+    errors_out: &mut Vec<ParseError>,
+    rodeo: &crate::SharedRodeo,
+) -> Result<()> {
+    const EVTX_SIG: u64 = 0x00656C6946666C45;
+    let mut header = [0u8; 8];
+    {
+        use std::io::Read;
+        let mut f = File::open(path)?;
+        let n = f.read(&mut header)?;
+        if n == 8 {
+            let sig = u64::from_le_bytes(header);
+            if sig == EVTX_SIG {
+                return crate::evtx::parse_evtx_file(path, sender, bytes_read, errors_out, rodeo);
+            }
+        }
+    }
+    parse_file(path, sender, bytes_read, errors_out, rodeo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -191,7 +191,7 @@ impl SysTraceApp {
                 let r = rodeo.clone();
                 std::thread::spawn(move || {
                     let mut errors = Vec::new();
-                    let _ = systrace_core::parse_file(&path2, &etx, &br, &mut errors, &r);
+                    let _ = systrace_core::parse_file_auto(&path2, &etx, &br, &mut errors, &r);
                     let _ = errors.len();
                 });
             }

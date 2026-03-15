@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SysTrace is a Rust GUI forensic analysis tool that parses Sysmon logs exported by EVTXECmd (NDJSON format) and displays them as an interactive process tree with process-centric telemetry browsing. Built for DFIR investigators.
+SysTrace is a Rust GUI forensic analysis tool for DFIR investigators. It ingests Sysmon operational logs — either raw `.evtx` binary files (parsed natively) or EVTXECmd NDJSON exports — constructs a process tree, and provides process-centric telemetry browsing across all 29 Sysmon event types.
 
 ## Architecture
 
@@ -16,9 +16,11 @@ Full architecture document: `.claude/architecture.md`
 
 **Key design decisions:**
 - GUI: egui (immediate mode) via eframe — chosen for virtual scrolling performance at 1M+ events
-- Parsing: Two-phase — first deserialize top-level EVTXECmd fields, then parse the inner `Payload` JSON string to extract `EventData.Data[]` fields
+- Input: `parse_file_auto()` auto-detects format by magic bytes — EVTX binary (`ElfFile\0`) → native parser in `evtx/mod.rs`; anything else → NDJSON parser in `parser.rs`
+- EVTX parser: pure Rust, no external tools — BinXml opcodes, template instances, substitution arrays; handles new vs old template format in sub blobs
+- Parsing (NDJSON): two-phase — first deserialize top-level EVTXECmd fields, then parse the inner `Payload` JSON string to extract `EventData.Data[]` fields
 - Indexing: Events indexed by ProcessGuid, EventId, and time at ingestion — no on-demand scanning
-- Threading: Background thread for file ingestion, crossbeam-channel to main/UI thread
+- Threading: Background thread for file ingestion, crossbeam-channel to main/UI thread; batches of 500 events, ≤20 batches drained per UI frame
 - Process tree: Built from EventId=1 (ProcessCreate) using ProcessGuid/ParentProcessGuid. Handles out-of-order events via pending_children map
 
 **Critical caveat:** The top-level `ProcessId` field in EVTXECmd JSON is the Sysmon service PID, NOT the monitored process. The actual process PID is inside `Payload.EventData.Data` where `@Name = "ProcessId"`.
@@ -36,7 +38,9 @@ cargo test -p systrace-core          # test core library only
 
 ## Sample Data
 
-`.claude/sysmon.json` contains a real EVTXECmd Sysmon export for testing. Each line is a self-contained JSON object with fields like EventId, TimeCreated, Payload (nested JSON string), PayloadData1-6, MapDescription, etc.
+- `.claude/sysmon.json` — real EVTXECmd NDJSON export for testing (smaller)
+- `.claude/sysmon2.json` — EVTXECmd NDJSON reference, 3759 records (used to verify EVTX parser field output)
+- `evtx/Microsoft-Windows-Sysmon%4Operational.evtx` — raw EVTX test file (3738 records)
 
 ## Sysmon Event Types
 
@@ -55,9 +59,8 @@ cargo test -p systrace-core          # test core library only
 - App Icon is located at the root folder of this project with the filename `icon.png`
 - This icon must be used to to create binary for Windows
 
-## Plans 
+## Plans
 
-- If you have to make plan, Make the plan extremely concise. Sacrifice grammar for the sake of concision.
-- At the end of each plan, give me a list of unresolved questions to answer, if any.
-- Write what need to be done in `tasks.md` in root directory of this project
-- Always mark what done in `tasks.md` in real time and suggest change to user if needs
+- Make plans extremely concise. Sacrifice grammar for concision.
+- At the end of each plan, list any unresolved questions.
+- Write tasks to `tasks.md` in the root directory; mark completed tasks in real time.

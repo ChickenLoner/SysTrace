@@ -153,7 +153,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: .github/release-notes.md
           files: |
             artifacts/systrace-linux-x86_64/systrace-linux-x86_64
             artifacts/systrace-windows-x86_64/systrace-windows-x86_64.exe
