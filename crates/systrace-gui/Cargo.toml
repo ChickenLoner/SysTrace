@@ -21,3 +21,9 @@ crossbeam-channel = { workspace = true }
 chrono = { workspace = true }
 lasso = { workspace = true }
 image = { version = "0.25", features = ["png"] }
+
+# Build-time dependencies (Windows icon embedding only)
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+ico          = "0.3"
+image        = { version = "0.25", features = ["png"] }

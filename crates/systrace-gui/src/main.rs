@@ -1,3 +1,6 @@
+// On Windows, don't open a console window behind the GUI.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod panels;
 mod state;
