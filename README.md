@@ -2,7 +2,7 @@
 
 ![Banner](assets/Banner.jpg)
 
-A fast, native GUI forensic analysis tool for **Sysmon** logs. Opens raw `.evtx` files directly or EVTXECmd NDJSON exports and presents them as an interactive process tree with process-centric telemetry browsing — built for DFIR investigators.
+A fast, native GUI forensic analysis tool for **Sysmon** logs. Opens raw `.evtx` files, EVTXECmd NDJSON exports, or EVTXECmd CSV exports and presents them as an interactive process tree with process-centric telemetry browsing — built for DFIR investigators.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue)
 ![Language](https://img.shields.io/badge/language-Rust-orange)
@@ -12,7 +12,7 @@ A fast, native GUI forensic analysis tool for **Sysmon** logs. Opens raw `.evtx`
 
 ## Features
 
-- **Native EVTX parsing** — open `.evtx` files directly, no external tools required; format auto-detected by magic bytes
+- **Three input formats** — `.evtx` (native binary), EVTXECmd NDJSON, or EVTXECmd CSV — all auto-detected on open, no configuration needed
 - **Interactive process tree** — full parent/child hierarchy from Sysmon EventId 1, with color coding for injection targets, SYSTEM processes, terminated processes, and synthetic placeholders
 - **9 telemetry tabs** per process — Overview, Network, Files, Registry, Pipes, Injection, Modules, Detection, Timeline
 - **Cross-process timeline** — select multiple processes, generate a unified time-sorted event table
@@ -74,17 +74,21 @@ The **Help** menu (or press `F1`) opens a reference window with three tabs: Colo
 systrace-gui "C:\Windows\System32\winevt\Logs\Microsoft-Windows-Sysmon%4Operational.evtx"
 ```
 
-Or drag and drop any `.evtx` or `.json` / `.ndjson` file onto the window.
+Or drag and drop any `.evtx`, `.json` / `.ndjson`, or `.csv` file onto the window.
 
 ### Alternative: EVTXECmd export (optional)
 
-If you prefer to pre-process with [EVTXECmd](https://github.com/EricZimmerman/evtx):
+If you prefer to pre-process with [EVTXECmd](https://github.com/EricZimmerman/evtx), both output formats are accepted:
 
 ```powershell
+# NDJSON export
 EVTXECmd.exe -f "C:\Windows\System32\winevt\Logs\Microsoft-Windows-Sysmon%4Operational.evtx" --json C:\output --jsonf sysmon.json
+
+# CSV export
+EVTXECmd.exe -f "C:\Windows\System32\winevt\Logs\Microsoft-Windows-Sysmon%4Operational.evtx" --csv C:\output --csvf sysmon.csv
 ```
 
-SysTrace auto-detects the format — both `.evtx` and NDJSON output are accepted.
+SysTrace auto-detects the format — `.evtx`, NDJSON, and CSV are all accepted.
 
 ---
 
@@ -198,7 +202,7 @@ Right-click any table row to copy individual fields or the full row as TSV.
 | `↑` / `↓` | Navigate process tree |
 | `Ctrl+Tab` | Next telemetry tab |
 | `Ctrl+Shift+Tab` | Previous telemetry tab |
-| Drag & Drop | Drop `.evtx`, `.json`, or `.ndjson` onto window to open |
+| Drag & Drop | Drop `.evtx`, `.json`, `.ndjson`, or `.csv` onto window to open |
 
 ---
 
@@ -214,7 +218,7 @@ crates/
 
 **Key decisions:**
 - **egui** (immediate mode) — virtual scrolling handles 1M+ events without DOM overhead
-- **Auto-detecting parser** — reads first 8 bytes; `ElfFile\0` → native EVTX binary parser; otherwise → NDJSON parser
+- **Auto-detecting parser** — reads magic bytes and first line: `ElfFile\0` → native EVTX binary parser; `{` → NDJSON parser; `RecordNumber,...` header → CSV parser
 - **Native EVTX parser** — pure Rust BinXml decoder with template caching and substitution resolution; no EVTXECmd dependency
 - **Two-phase parsing (NDJSON)** — top-level EVTXECmd fields first, then the inner `Payload` JSON string for `EventData.Data[]`
 - **Indexed EventStore** — events indexed by ProcessGuid, EventId, and target process at ingestion; no on-demand linear scans
