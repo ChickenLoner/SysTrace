@@ -1,6 +1,10 @@
-## SysTrace v1.1.0
+## SysTrace v1.2.0
 
 A fast, native Rust GUI forensic analysis tool for Sysmon logs — built for DFIR investigators.
+
+### What's new in v1.2.0
+
+- **CSV import** — open EVTXECmd `.csv` exports directly. Format auto-detected by header content (`RecordNumber` column). Produces identical results to NDJSON import.
 
 ### What's new in v1.1.0
 
@@ -8,7 +12,7 @@ A fast, native Rust GUI forensic analysis tool for Sysmon logs — built for DFI
 
 ### Features
 
-- **Native EVTX parsing** — open `.evtx` files directly, no external tools required; format auto-detected by magic bytes
+- **Three input formats** — `.evtx` (native binary), EVTXECmd NDJSON, or EVTXECmd CSV — all auto-detected on open
 - **Interactive process tree** — full parent/child hierarchy from Sysmon EventId 1, with color coding for injection targets, SYSTEM processes, terminated processes, and synthetic placeholders
 - **9 telemetry tabs per process** — Overview, Network, Files, Registry, Pipes, Injection, Modules, Detection, Timeline
 - **Cross-process timeline** — select multiple processes, generate a unified time-sorted event table
@@ -23,10 +27,11 @@ A fast, native Rust GUI forensic analysis tool for Sysmon logs — built for DFI
 
 ### Getting Started
 
-Drop a `.evtx` file or EVTXECmd NDJSON export onto the window, or pass it as a CLI argument:
+Drop a `.evtx`, NDJSON, or CSV file onto the window, or pass it as a CLI argument:
 
 ```
 systrace-gui Microsoft-Windows-Sysmon%4Operational.evtx
+systrace-gui sysmon_export.csv
 ```
 
 ### Downloads

@@ -51,6 +51,9 @@ pub enum ParseError {
         #[source]
         source: chrono::ParseError,
     },
+
+    #[error("csv row {line}: {message}")]
+    CsvRowError { line: u64, message: String },
 }
 
 /// Parse a Sysmon GUID string ("817bddf3-3514-65cc-0802-000000001900") into 16 bytes.

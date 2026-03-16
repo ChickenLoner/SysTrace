@@ -1,6 +1,6 @@
 [package]
 name = "systrace-gui"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 authors = ["Warawut Manosong (Chicken0248)"]
 description = "SysTrace — Sysmon forensic analysis tool for DFIR investigators"

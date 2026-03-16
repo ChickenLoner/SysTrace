@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SysTrace is a Rust GUI forensic analysis tool for DFIR investigators. It ingests Sysmon operational logs — either raw `.evtx` binary files (parsed natively) or EVTXECmd NDJSON exports — constructs a process tree, and provides process-centric telemetry browsing across all 29 Sysmon event types.
+SysTrace is a Rust GUI forensic analysis tool for DFIR investigators. It ingests Sysmon operational logs — raw `.evtx` binary files (parsed natively), EVTXECmd NDJSON exports, or EVTXECmd CSV exports — constructs a process tree, and provides process-centric telemetry browsing across all 29 Sysmon event types.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ Full architecture document: `.claude/architecture.md`
 
 **Key design decisions:**
 - GUI: egui (immediate mode) via eframe — chosen for virtual scrolling performance at 1M+ events
-- Input: `parse_file_auto()` auto-detects format by magic bytes — EVTX binary (`ElfFile\0`) → native parser in `evtx/mod.rs`; anything else → NDJSON parser in `parser.rs`
+- Input: `parse_file_auto()` auto-detects format — EVTX binary (`ElfFile\0` magic) → native parser in `evtx/mod.rs`; first line starts with `{` → NDJSON parser; first line contains `RecordNumber` + commas → CSV parser; all in `parser.rs`
 - EVTX parser: pure Rust, no external tools — BinXml opcodes, template instances, substitution arrays; handles new vs old template format in sub blobs
 - Parsing (NDJSON): two-phase — first deserialize top-level EVTXECmd fields, then parse the inner `Payload` JSON string to extract `EventData.Data[]` fields
 - Indexing: Events indexed by ProcessGuid, EventId, and time at ingestion — no on-demand scanning
@@ -40,6 +40,7 @@ cargo test -p systrace-core          # test core library only
 
 - `.claude/sysmon.json` — real EVTXECmd NDJSON export for testing (smaller)
 - `.claude/sysmon2.json` — EVTXECmd NDJSON reference, 3759 records (used to verify EVTX parser field output)
+- `.claude/sysmon2.csv` — EVTXECmd CSV reference, 3759 records (used to verify CSV parser output)
 - `evtx/Microsoft-Windows-Sysmon%4Operational.evtx` — raw EVTX test file (3738 records)
 
 ## Sysmon Event Types
