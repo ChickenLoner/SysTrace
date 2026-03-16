@@ -14,5 +14,6 @@ thiserror = { workspace = true }
 crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+csv = "1"
 
 [dev-dependencies]

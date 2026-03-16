@@ -753,7 +753,7 @@ impl SysTraceApp {
             ui.menu_button("File", |ui| {
                 if ui.button("Open…").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Sysmon Logs", &["evtx", "json", "ndjson"])
+                        .add_filter("Sysmon Logs", &["evtx", "json", "ndjson", "csv"])
                         .pick_file()
                     {
                         self.open_file(path);

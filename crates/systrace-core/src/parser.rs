@@ -215,6 +215,13 @@ fn parse_timestamp(s: &str, line: u64, errors: &mut Vec<ParseError>) -> Option<T
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
         return Some(chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc));
     }
+    // CSV format: "2023-05-03 11:15:12.2335395" (space separator, no timezone)
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        return Some(chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc));
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return Some(chrono::DateTime::from_naive_utc_and_offset(dt, chrono::Utc));
+    }
     errors.push(ParseError::InvalidTimestamp {
         line,
         value: s.to_owned(),
@@ -571,13 +578,131 @@ pub fn parse_file(
 }
 
 // ---------------------------------------------------------------------------
-// Auto-detecting parser — dispatches to EVTX or NDJSON based on file magic
+// CSV parser (EVTXECmd CSV export)
 // ---------------------------------------------------------------------------
 
-/// Parse a Sysmon log file, auto-detecting format by magic bytes.
+/// Parse an EVTXECmd CSV export and stream `SysmonEvent` batches over `sender`.
+pub fn parse_csv_file(
+    path: &Path,
+    sender: &crossbeam_channel::Sender<Vec<SysmonEvent>>,
+    bytes_read: &Arc<AtomicU64>,
+    errors_out: &mut Vec<ParseError>,
+    rodeo: &crate::SharedRodeo,
+) -> Result<()> {
+    let file = File::open(path)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(BufReader::with_capacity(64 * 1024, file));
+
+    // Build column index map from header names
+    let headers = rdr.headers()?.clone();
+    let col: HashMap<&str, usize> = headers.iter().enumerate().map(|(i, n)| (n, i)).collect();
+
+    let idx_record_num  = col.get("RecordNumber").copied();
+    let idx_event_id    = col.get("EventId").copied();
+    let idx_time        = col.get("TimeCreated").copied();
+    let idx_payload     = col.get("Payload").copied();
+    let idx_computer    = col.get("Computer").copied();
+    let idx_user        = col.get("UserName").copied();
+    let idx_map_desc    = col.get("MapDescription").copied();
+    let idx_exec_info   = col.get("ExecutableInfo").copied();
+    let idx_pd1         = col.get("PayloadData1").copied();
+    let idx_pd2         = col.get("PayloadData2").copied();
+    let idx_pd3         = col.get("PayloadData3").copied();
+    let idx_pd4         = col.get("PayloadData4").copied();
+    let idx_pd5         = col.get("PayloadData5").copied();
+    let idx_pd6         = col.get("PayloadData6").copied();
+
+    let mut batch: Vec<SysmonEvent> = Vec::with_capacity(BATCH_SIZE);
+    let mut row_num: u64 = 0;
+
+    for result in rdr.records() {
+        row_num += 1;
+        let record = match result {
+            Ok(r) => r,
+            Err(e) => {
+                errors_out.push(ParseError::CsvRowError { line: row_num, message: e.to_string() });
+                continue;
+            }
+        };
+        bytes_read.fetch_add(record.as_slice().len() as u64, Ordering::Relaxed);
+
+        let get = |idx: Option<usize>| -> Option<&str> {
+            idx.and_then(|i| record.get(i)).filter(|s| !s.is_empty())
+        };
+
+        let event_id: u16 = match get(idx_event_id).and_then(|s| s.parse().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+        let record_number: u64 = get(idx_record_num).and_then(|s| s.parse().ok()).unwrap_or(row_num);
+        let time_created = match get(idx_time) {
+            Some(t) => t.to_owned(),
+            None => continue,
+        };
+        let payload = match get(idx_payload) {
+            Some(p) => p.to_owned(),
+            None => continue,
+        };
+        let computer = get(idx_computer).unwrap_or("").to_owned();
+
+        let raw = RawEvtxRecord {
+            event_id,
+            time_created,
+            record_number,
+            payload,
+            computer,
+            user_name:       get(idx_user).map(str::to_owned),
+            map_description: get(idx_map_desc).map(str::to_owned),
+            executable_info: get(idx_exec_info).map(str::to_owned),
+            payload_data1:   get(idx_pd1).map(str::to_owned),
+            payload_data2:   get(idx_pd2).map(str::to_owned),
+            payload_data3:   get(idx_pd3).map(str::to_owned),
+            payload_data4:   get(idx_pd4).map(str::to_owned),
+            payload_data5:   get(idx_pd5).map(str::to_owned),
+            payload_data6:   get(idx_pd6).map(str::to_owned),
+        };
+
+        let fields = match parse_payload(&raw.payload) {
+            Ok(f) => f,
+            Err(e) => {
+                errors_out.push(ParseError::PayloadDeserialize { line: row_num, source: e });
+                continue;
+            }
+        };
+
+        let mut local_errors = Vec::new();
+        if let Some(event) = extract_event(raw, &fields, row_num, &mut local_errors, rodeo) {
+            batch.push(event);
+        }
+        errors_out.extend(local_errors);
+
+        if batch.len() >= BATCH_SIZE {
+            let full_batch = std::mem::replace(&mut batch, Vec::with_capacity(BATCH_SIZE));
+            if sender.send(full_batch).is_err() {
+                break;
+            }
+        }
+    }
+
+    if !batch.is_empty() {
+        let _ = sender.send(batch);
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Auto-detecting parser — dispatches to EVTX, CSV, or NDJSON
+// ---------------------------------------------------------------------------
+
+/// Parse a Sysmon log file, auto-detecting format by magic bytes and content.
 ///
 /// - First 8 bytes == `ElfFile\0` → native EVTX binary parser
-/// - Otherwise → existing EVTXECmd NDJSON parser
+/// - First line starts with `{` → EVTXECmd NDJSON parser
+/// - First line contains `RecordNumber` and commas → EVTXECmd CSV parser
+/// - Otherwise → fall back to NDJSON parser
 pub fn parse_file_auto(
     path: &Path,
     sender: &crossbeam_channel::Sender<Vec<SysmonEvent>>,
@@ -598,12 +723,44 @@ pub fn parse_file_auto(
             }
         }
     }
+    // Read first line to distinguish NDJSON from CSV
+    {
+        let f = File::open(path)?;
+        let mut reader = BufReader::with_capacity(4096, f);
+        let mut first_line = String::new();
+        reader.read_line(&mut first_line)?;
+        let trimmed = first_line.trim();
+        if trimmed.starts_with('{') {
+            return parse_file(path, sender, bytes_read, errors_out, rodeo);
+        }
+        if trimmed.contains("RecordNumber") && trimmed.contains(',') {
+            return parse_csv_file(path, sender, bytes_read, errors_out, rodeo);
+        }
+    }
     parse_file(path, sender, bytes_read, errors_out, rodeo)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_csv_file_record_count() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.claude/sysmon2.csv");
+        if !path.exists() {
+            eprintln!("skipping test: {:?} not found", path);
+            return;
+        }
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let bytes_read = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let rodeo = crate::new_rodeo();
+        let mut errors = Vec::new();
+        parse_csv_file(&path, &sender, &bytes_read, &mut errors, &rodeo).unwrap();
+        drop(sender);
+        let events: Vec<_> = receiver.into_iter().flatten().collect();
+        assert_eq!(events.len(), 3759, "expected 3759 events, got {}", events.len());
+    }
 
     #[test]
     fn parse_payload_basic() {
