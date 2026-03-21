@@ -462,116 +462,22 @@ impl SysTraceApp {
     // Phase 5: Export
     // -----------------------------------------------------------------------
 
-    fn csv_escape(s: &str) -> String {
-        if s.contains(',') || s.contains('"') || s.contains('\n') {
-            format!("\"{}\"", s.replace('"', "\"\""))
-        } else {
-            s.to_owned()
-        }
-    }
-
-    fn json_escape(s: &str) -> String {
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "")
-    }
-
-    fn export_events_csv(&self) {
+    fn export_timeline(&self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("CSV", &["csv"])
-            .set_file_name("systrace_events.csv")
+            .set_file_name("timeline.csv")
             .save_file()
         else {
             return;
         };
-
-        use std::io::Write;
-        let Ok(mut f) = std::fs::File::create(&path) else { return; };
-        let rodeo = &self.state.rodeo;
-        let _ = writeln!(f, "Time,EventID,EventType,Computer,Image,User");
-        for ev in &self.state.event_store.events {
-            let time = ev.time_created.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-            let etype = ev.event_type.display_name();
-            let computer = rodeo.resolve(&ev.computer);
-            let image = ev.image.map(|s| rodeo.resolve(&s).to_owned()).unwrap_or_default();
-            let user = ev.user.map(|s| rodeo.resolve(&s).to_owned()).unwrap_or_default();
-            let _ = writeln!(
-                f,
-                "{},{},{},{},{},{}",
-                Self::csv_escape(&time),
-                ev.event_id,
-                etype,
-                Self::csv_escape(computer),
-                Self::csv_escape(&image),
-                Self::csv_escape(&user),
-            );
-        }
-    }
-
-    fn export_tree_dot(&self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("DOT / Graphviz", &["dot"])
-            .set_file_name("process_tree.dot")
-            .save_file()
-        else {
-            return;
-        };
-
-        use std::io::Write;
-        let Ok(mut f) = std::fs::File::create(&path) else { return; };
-        let _ = writeln!(f, "digraph ProcessTree {{");
-        let _ = writeln!(f, "  rankdir=LR;");
-        let _ = writeln!(f, "  node [shape=box fontname=\"monospace\"];");
-        for (guid, node) in &self.state.process_tree.nodes {
-            let gid: String = guid.iter().map(|b| format!("{b:02x}")).collect();
-            let label = node.image_name.as_deref().unwrap_or("?");
-            let pid = node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_owned());
-            let style = if node.is_synthetic {
-                " style=dashed"
-            } else if node.end_time.is_some() {
-                " color=gray"
-            } else {
-                ""
-            };
-            let label_esc = label.replace('"', "\\\"");
-            let _ = writeln!(f, "  n{gid} [label=\"{label_esc}\\n({pid})\"{style}];");
-            if let Some(parent_guid) = &node.parent_guid {
-                let pgid: String = parent_guid.iter().map(|b| format!("{b:02x}")).collect();
-                let _ = writeln!(f, "  n{pgid} -> n{gid};");
-            }
-        }
-        let _ = writeln!(f, "}}");
-    }
-
-    fn export_events_json(&self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("JSON", &["json"])
-            .set_file_name("systrace_events.json")
-            .save_file()
-        else {
-            return;
-        };
-
-        use std::io::Write;
-        let Ok(mut f) = std::fs::File::create(&path) else { return; };
-        let rodeo = &self.state.rodeo;
-        let total = self.state.event_store.events.len();
-        let _ = writeln!(f, "[");
-        for (i, ev) in self.state.event_store.events.iter().enumerate() {
-            let time = ev.time_created.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-            let etype = ev.event_type.display_name();
-            let computer = Self::json_escape(rodeo.resolve(&ev.computer));
-            let image = ev.image.map(|s| Self::json_escape(rodeo.resolve(&s))).unwrap_or_default();
-            let user = ev.user.map(|s| Self::json_escape(rodeo.resolve(&s))).unwrap_or_default();
-            let comma = if i < total - 1 { "," } else { "" };
-            let _ = writeln!(
-                f,
-                "  {{\"time\":\"{time}\",\"event_id\":{},\"event_type\":\"{etype}\",\"computer\":\"{computer}\",\"image\":\"{image}\",\"user\":\"{user}\"}}{comma}",
-                ev.event_id,
-            );
-        }
-        let _ = writeln!(f, "]");
+        let _ = panels::timeline::export_timeline_csv(
+            &path,
+            &self.state.event_store,
+            &self.state.process_tree,
+            &self.state.rodeo,
+            &self.state.timeline_events,
+            &self.state.timeline_event_filter,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -806,15 +712,18 @@ impl SysTraceApp {
             return;
         }
 
-        // Event filter bar
+        // Event filter bar + export
         ui.horizontal(|ui| {
             ui.label("Filter events:");
             egui::TextEdit::singleline(&mut self.state.timeline_event_filter)
                 .hint_text("Filter rows\u{2026}")
-                .desired_width(ui.available_width() - 40.0)
+                .desired_width(ui.available_width() - 120.0)
                 .show(ui);
             if !self.state.timeline_event_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
                 self.state.timeline_event_filter.clear();
+            }
+            if ui.button("Export CSV\u{2026}").clicked() {
+                self.export_timeline();
             }
         });
         ui.separator();
@@ -867,24 +776,6 @@ impl SysTraceApp {
                         }
                     });
                 }
-
-                ui.separator();
-
-                // Export submenu
-                ui.menu_button("Export", |ui| {
-                    if ui.button("Events as CSV…").clicked() {
-                        self.export_events_csv();
-                        ui.close_menu();
-                    }
-                    if ui.button("Events as JSON…").clicked() {
-                        self.export_events_json();
-                        ui.close_menu();
-                    }
-                    if ui.button("Process Tree as DOT…").clicked() {
-                        self.export_tree_dot();
-                        ui.close_menu();
-                    }
-                });
 
                 ui.separator();
 
@@ -2478,10 +2369,8 @@ impl SysTraceApp {
              (top 12), Event Type Breakdown (top 20), and Host breakdown (if multi-host). \
              Stats respect the current host filter.");
 
-        section(ui, "Export (File menu)",
-            "Events as CSV — all events with time, EventID, type, computer, image, user. \
-             Events as JSON — same data as JSON array. \
-             Process Tree as DOT — Graphviz dot file for visualisation.");
+        section(ui, "Export Timeline",
+            "In the Timeline tab, click Export CSV… to save the current timeline (with any active row filter applied) as a CSV file.");
     }
 }
 
