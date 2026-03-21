@@ -1,6 +1,14 @@
-## SysTrace v1.2.0
+## SysTrace v1.3.0
 
 A fast, native Rust GUI forensic analysis tool for Sysmon logs — built for DFIR investigators.
+
+### What's new in v1.3.0
+
+- **Multi-file tabs** — open multiple Sysmon log files simultaneously, each in its own tab. Switch between investigations without closing the current file. Tabs can be renamed.
+- **Sigma rule engine** — load `.yml` Sigma rules or entire rule folders via the Detection panel. Matching processes are flagged in the tree and surfaced in the Detection tab.
+- **Timeline CSV export** — export the cross-process timeline table to a `.csv` file directly from the Timeline toolbar.
+- **Time filter improvements** — date/time range filter now correctly filters by process start time; synthetic nodes (no ProcessCreate event) are hidden when the filter is active.
+- **Fix: JSON files with UTF-8 BOM** — EVTXECmd NDJSON exports that begin with a UTF-8 BOM (common on Windows) were being misrouted to the CSV parser and loading 0 events. Fixed by stripping the BOM before format detection and before parsing line 1.
 
 ### What's new in v1.2.0
 

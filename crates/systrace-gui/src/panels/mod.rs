@@ -5,6 +5,7 @@ pub mod injection;
 pub mod network;
 pub mod pipes;
 pub mod registry;
+pub mod sigma;
 pub mod timeline;
 
 /// Column sort state for a telemetry table.

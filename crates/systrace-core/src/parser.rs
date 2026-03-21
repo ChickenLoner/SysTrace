@@ -517,6 +517,13 @@ pub fn parse_file(
         let line = line_result?;
         bytes_read.fetch_add(line.len() as u64 + 1, Ordering::Relaxed);
 
+        // Strip UTF-8 BOM from the first line (some editors/tools emit it).
+        let line = if line_num == 1 {
+            line.trim_start_matches('\u{FEFF}').to_owned()
+        } else {
+            line
+        };
+
         if line.trim().is_empty() {
             continue;
         }
@@ -729,7 +736,8 @@ pub fn parse_file_auto(
         let mut reader = BufReader::with_capacity(4096, f);
         let mut first_line = String::new();
         reader.read_line(&mut first_line)?;
-        let trimmed = first_line.trim();
+        // Strip UTF-8 BOM (EF BB BF → U+FEFF) before format detection.
+        let trimmed = first_line.trim_start_matches('\u{FEFF}').trim();
         if trimmed.starts_with('{') {
             return parse_file(path, sender, bytes_read, errors_out, rodeo);
         }

@@ -31,28 +31,72 @@ fn tree_node_id(guid: ProcessGuid) -> egui::Id {
 }
 
 // ---------------------------------------------------------------------------
+// Per-file tab
+// ---------------------------------------------------------------------------
+
+struct FileTab {
+    state: AppState,
+    path: Option<PathBuf>,
+    display_name: String,
+    rx: Option<Receiver<LoadMsg>>,
+    bytes_read: Arc<AtomicU64>,
+    rename_mode: bool,
+    rename_buf: String,
+}
+
+impl FileTab {
+    fn for_path(path: &PathBuf) -> Self {
+        let display_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("(unknown)")
+            .to_owned();
+        Self {
+            state: AppState::default(),
+            path: Some(path.clone()),
+            display_name,
+            rx: None,
+            bytes_read: Arc::new(AtomicU64::new(0)),
+            rename_mode: false,
+            rename_buf: String::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Application
 // ---------------------------------------------------------------------------
 
 pub struct SysTraceApp {
-    state: AppState,
-    /// Active file path (displayed in status bar).
-    file_path: Option<PathBuf>,
-    /// Channel receiving parsed event batches from the background thread.
-    rx: Option<Receiver<LoadMsg>>,
-    /// Atomic bytes-read counter shared with the background thread.
-    bytes_read: Arc<AtomicU64>,
+    tabs: Vec<FileTab>,
+    active_tab: usize,
 }
 
 impl Default for SysTraceApp {
     fn default() -> Self {
         Self {
-            state: AppState::default(),
-            file_path: None,
-            rx: None,
-            bytes_read: Arc::new(AtomicU64::new(0)),
+            tabs: Vec::new(),
+            active_tab: 0,
         }
     }
+}
+
+/// Recursively collect .yml/.yaml files under `dir`.
+fn collect_sigma_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(collect_sigma_files(&path));
+            } else if let Some(ext) = path.extension() {
+                if ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Draw a horizontal bar chart for stats sections.
@@ -133,15 +177,45 @@ impl SysTraceApp {
 
     /// Select a process and reset per-tab row selection (keep sort preferences).
     fn select_process(&mut self, guid: ProcessGuid) {
-        self.state.selected_process = Some(guid);
-        self.state.active_tab = TelemetryTab::Overview;
-        self.state.scroll_to_selected = true;
-        self.state.tab_network.selected_row = None;
-        self.state.tab_files.selected_row = None;
-        self.state.tab_registry.selected_row = None;
-        self.state.tab_pipes.selected_row = None;
-        self.state.tab_injection.selected_row = None;
-        self.state.tab_drivers.selected_row = None;
+        self.tabs[self.active_tab].state.selected_process = Some(guid);
+        self.tabs[self.active_tab].state.active_tab = TelemetryTab::Overview;
+        self.tabs[self.active_tab].state.scroll_to_selected = true;
+        self.tabs[self.active_tab].state.tab_network.selected_row = None;
+        self.tabs[self.active_tab].state.tab_files.selected_row = None;
+        self.tabs[self.active_tab].state.tab_registry.selected_row = None;
+        self.tabs[self.active_tab].state.tab_pipes.selected_row = None;
+        self.tabs[self.active_tab].state.tab_injection.selected_row = None;
+        self.tabs[self.active_tab].state.tab_drivers.selected_row = None;
+    }
+
+    // -----------------------------------------------------------------------
+    // Sigma rule loading
+    // -----------------------------------------------------------------------
+
+    /// Parse sigma rules from an iterator of file paths, append to `sigma_rules`,
+    /// then re-run evaluation if a log file is already loaded.
+    fn load_sigma_rules_from_paths(&mut self, paths: impl Iterator<Item = PathBuf>) {
+        self.tabs[self.active_tab].state.sigma_rules.clear();
+        for path in paths {
+            if let Ok(yaml) = std::fs::read_to_string(&path) {
+                match systrace_core::SigmaRule::from_yaml(&yaml) {
+                    Ok(rule) => self.tabs[self.active_tab].state.sigma_rules.push(rule),
+                    Err(e) => tracing::warn!("Failed to parse {}: {e}", path.display()),
+                }
+            }
+        }
+        // Re-evaluate against loaded events
+        if self.tabs[self.active_tab].state.file_metadata.is_some() {
+            self.tabs[self.active_tab].state.sigma_matches = systrace_core::evaluate_rules(
+                &self.tabs[self.active_tab].state.sigma_rules,
+                &self.tabs[self.active_tab].state.event_store,
+                &self.tabs[self.active_tab].state.rodeo,
+            );
+            self.tabs[self.active_tab].state.sigma_match_guids = self.tabs[self.active_tab].state.sigma_matches
+                .iter()
+                .filter_map(|m| m.process_guid)
+                .collect();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -149,41 +223,50 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn open_file(&mut self, path: PathBuf) {
+        // Switch to existing tab if already open.
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if tab.path.as_ref() == Some(&path) {
+                self.active_tab = i;
+                return;
+            }
+        }
+
         let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(1);
 
-        // Preserve cross-file state
-        let dark_mode = self.state.dark_mode;
-        let bookmarks = std::mem::take(&mut self.state.bookmarks);
-        let mut recent_files = std::mem::take(&mut self.state.recent_files);
+        // Inherit cross-tab state from the current active tab (if any).
+        let dark_mode = self.tabs.get(self.active_tab).map(|t| t.state.dark_mode).unwrap_or(false);
+        let mut recent_files: Vec<PathBuf> = self.tabs.get(self.active_tab)
+            .map(|t| t.state.recent_files.clone())
+            .unwrap_or_default();
         recent_files.retain(|p| p != &path);
         recent_files.insert(0, path.clone());
         recent_files.truncate(10);
 
-        // Create a fresh rodeo that will be shared with the parser thread.
+        // Sync recent_files into every existing tab.
+        for tab in &mut self.tabs {
+            tab.state.recent_files = recent_files.clone();
+        }
+
+        // Build the new tab.
         let rodeo = systrace_core::new_rodeo();
-
-        // Reset all state for the new file, then install the new rodeo.
-        self.state = AppState::default();
-        self.state.rodeo = rodeo.clone();
-        self.state.file_size = file_size;
-        self.state.loading_progress = Some(0.0);
-        self.bytes_read = Arc::new(AtomicU64::new(0));
-        self.file_path = Some(path.clone());
-
-        // Restore preserved state
-        self.state.dark_mode = dark_mode;
-        self.state.bookmarks = bookmarks;
-        self.state.recent_files = recent_files;
+        let mut tab = FileTab::for_path(&path);
+        tab.state.rodeo = rodeo.clone();
+        tab.state.file_size = file_size;
+        tab.state.loading_progress = Some(0.0);
+        tab.state.dark_mode = dark_mode;
+        tab.state.recent_files = recent_files;
+        tab.bytes_read = Arc::new(AtomicU64::new(0));
 
         let (tx, rx) = crossbeam_channel::bounded::<LoadMsg>(64);
-        self.rx = Some(rx);
+        tab.rx = Some(rx);
+        let bytes_read = tab.bytes_read.clone();
 
-        let bytes_read = self.bytes_read.clone();
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
 
         std::thread::spawn(move || {
             let (event_tx, event_rx) = crossbeam_channel::bounded::<Vec<SysmonEvent>>(64);
             let error_count = 0usize;
-
             {
                 let path2 = path.clone();
                 let br = bytes_read.clone();
@@ -196,7 +279,6 @@ impl SysTraceApp {
                 });
             }
             drop(event_tx);
-
             for batch in event_rx {
                 if tx.send(LoadMsg::Batch(batch)).is_err() {
                     return;
@@ -206,67 +288,65 @@ impl SysTraceApp {
         });
     }
 
-    /// Poll the loading channel — called once per frame.
+    /// Poll the loading channel for every tab — called once per frame.
     fn poll_loading(&mut self) {
-        let file_size = self.state.file_size.max(1);
+        for i in 0..self.tabs.len() {
+            self.poll_tab_loading(i);
+        }
+    }
 
-        let rx = match self.rx.take() {
+    fn poll_tab_loading(&mut self, i: usize) {
+        let file_size = self.tabs[i].state.file_size.max(1);
+        let rx = match self.tabs[i].rx.take() {
             Some(r) => r,
             None => return,
         };
-
-        let mut batches_this_frame = 0;
-
+        let mut batches = 0;
         loop {
-            if batches_this_frame >= MAX_BATCHES_PER_FRAME {
-                self.rx = Some(rx);
+            if batches >= MAX_BATCHES_PER_FRAME {
+                self.tabs[i].rx = Some(rx);
                 return;
             }
-
             match rx.try_recv() {
                 Ok(LoadMsg::Batch(batch)) => {
-                    batches_this_frame += 1;
-                    let rodeo = self.state.rodeo.clone();
+                    batches += 1;
+                    let rodeo = self.tabs[i].state.rodeo.clone();
                     for event in batch {
                         if event.event_id == 1 {
-                            self.state.process_tree.insert_process_create(&event, &rodeo);
+                            self.tabs[i].state.process_tree.insert_process_create(&event, &rodeo);
                         } else if event.event_id == 5 {
                             if let Some(guid) = event.process_guid {
-                                self.state
-                                    .process_tree
+                                self.tabs[i].state.process_tree
                                     .update_process_terminate(guid, event.time_created);
                             }
                         }
-                        self.state.event_store.insert(event);
+                        self.tabs[i].state.event_store.insert(event);
                     }
-                    let read = self.bytes_read.load(Ordering::Relaxed);
-                    self.state.loading_progress =
+                    let read = self.tabs[i].bytes_read.load(Ordering::Relaxed);
+                    self.tabs[i].state.loading_progress =
                         Some((read as f32 / file_size as f32).min(0.99));
                 }
                 Ok(LoadMsg::Done { error_count }) => {
-                    self.state.parse_error_count = error_count;
+                    self.tabs[i].state.parse_error_count = error_count;
                     break;
                 }
                 Err(TryRecvError::Empty) => {
-                    self.rx = Some(rx);
-                    let read = self.bytes_read.load(Ordering::Relaxed);
-                    self.state.loading_progress =
+                    self.tabs[i].rx = Some(rx);
+                    let read = self.tabs[i].bytes_read.load(Ordering::Relaxed);
+                    self.tabs[i].state.loading_progress =
                         Some((read as f32 / file_size as f32).min(0.99));
                     return;
                 }
-                Err(TryRecvError::Disconnected) => {
-                    break;
-                }
+                Err(TryRecvError::Disconnected) => break,
             }
         }
-
-        self.state.process_tree.finalise();
-        self.state.loading_progress = None;
-        self.compute_file_metadata();
+        self.tabs[i].state.process_tree.finalise();
+        self.tabs[i].state.loading_progress = None;
+        self.compute_file_metadata_for(i);
     }
 
-    fn compute_file_metadata(&mut self) {
-        let counts: std::collections::HashMap<u16, usize> = self
+    fn compute_file_metadata_for(&mut self, i: usize) {
+        let counts: std::collections::HashMap<u16, usize> = self.tabs[i]
             .state
             .event_store
             .event_type_counts()
@@ -276,63 +356,81 @@ impl SysTraceApp {
         let mut time_range: Option<(systrace_core::Timestamp, systrace_core::Timestamp)> = None;
         let mut computer_names = std::collections::HashSet::new();
 
-        let rodeo = self.state.rodeo.clone();
-        for event in &self.state.event_store.events {
+        let rodeo = self.tabs[i].state.rodeo.clone();
+        for event in &self.tabs[i].state.event_store.events {
             computer_names.insert(rodeo.resolve(&event.computer).to_owned());
             match &mut time_range {
                 None => time_range = Some((event.time_created, event.time_created)),
                 Some((min, max)) => {
-                    if event.time_created < *min {
-                        *min = event.time_created;
-                    }
-                    if event.time_created > *max {
-                        *max = event.time_created;
-                    }
+                    if event.time_created < *min { *min = event.time_created; }
+                    if event.time_created > *max { *max = event.time_created; }
                 }
             }
         }
 
-        let path_str = self
-            .file_path
-            .as_ref()
+        let path_str = self.tabs[i].path.as_ref()
             .and_then(|p| p.to_str())
             .unwrap_or("")
             .to_owned();
 
-        self.state.file_metadata = Some(FileMetadata {
+        self.tabs[i].state.file_metadata = Some(FileMetadata {
             path: path_str,
-            total_records: self.state.event_store.len() as u64,
-            unique_processes: self.state.process_tree.len(),
+            total_records: self.tabs[i].state.event_store.len() as u64,
+            unique_processes: self.tabs[i].state.process_tree.len(),
             event_type_counts: counts,
             time_range,
             computer_names,
         });
 
+        // Collect unique dates from all events.
+        {
+            let mut date_set = std::collections::BTreeSet::new();
+            for ev in &self.tabs[i].state.event_store.events {
+                date_set.insert(ev.time_created.date_naive());
+            }
+            self.tabs[i].state.available_dates = date_set.into_iter().collect();
+        }
+        let last_idx = self.tabs[i].state.available_dates.len().saturating_sub(1);
+        self.tabs[i].state.time_filter_active = false;
+        self.tabs[i].state.time_filter_from_date_idx = 0;
+        self.tabs[i].state.time_filter_from_hm = (0, 0);
+        self.tabs[i].state.time_filter_to_date_idx = last_idx;
+        self.tabs[i].state.time_filter_to_hm = (23, 59);
+        self.tabs[i].state.time_range_filter = None;
+
+        // Run sigma rule evaluation against all loaded events.
+        self.tabs[i].state.sigma_matches = systrace_core::evaluate_rules(
+            &self.tabs[i].state.sigma_rules,
+            &self.tabs[i].state.event_store,
+            &self.tabs[i].state.rodeo,
+        );
+        self.tabs[i].state.sigma_match_guids = self.tabs[i].state.sigma_matches
+            .iter()
+            .filter_map(|m| m.process_guid)
+            .collect();
+
         // Collect unique MITRE technique IDs across all events.
-        self.state.available_mitre = self
+        self.tabs[i].state.available_mitre = self.tabs[i]
             .state
             .event_store
             .events
             .iter()
             .filter_map(|ev| ev.mitre_technique.as_ref().map(|m| m.id.clone()))
             .collect();
-        self.state.mitre_filter.clear();
+        self.tabs[i].state.mitre_filter.clear();
 
         // ── Precompute for SpecialFilter ──────────────────────────────────────
 
-        // Network processes: have at least one EventId 3 (NetworkConnect) or 22 (DnsQuery).
         let mut network_processes = std::collections::HashSet::new();
         for &eid in &[3u16, 22] {
-            for &idx in self.state.event_store.events_for_type(eid) {
-                if let Some(guid) = self.state.event_store.events[idx].process_guid {
+            for &idx in self.tabs[i].state.event_store.events_for_type(eid) {
+                if let Some(guid) = self.tabs[i].state.event_store.events[idx].process_guid {
                     network_processes.insert(guid);
                 }
             }
         }
-        self.state.network_processes = network_processes;
+        self.tabs[i].state.network_processes = network_processes;
 
-        // Persistence processes: registry events (12-14) touching known paths,
-        // or process image_name is schtasks.exe / at.exe.
         const PERSIST_PATTERNS: &[&str] = &[
             r"\currentversion\run\",
             r"\currentversion\runonce\",
@@ -346,8 +444,8 @@ impl SysTraceApp {
         ];
         let mut persistence_processes = std::collections::HashSet::new();
         for &eid in &[12u16, 13, 14] {
-            for &idx in self.state.event_store.events_for_type(eid) {
-                let ev = &self.state.event_store.events[idx];
+            for &idx in self.tabs[i].state.event_store.events_for_type(eid) {
+                let ev = &self.tabs[i].state.event_store.events[idx];
                 if let EventDetail::RegistryEvent { target_object: Some(path), .. } = &ev.detail {
                     let path_lc = path.to_lowercase();
                     if PERSIST_PATTERNS.iter().any(|p| path_lc.contains(p)) {
@@ -358,7 +456,7 @@ impl SysTraceApp {
                 }
             }
         }
-        for node in self.state.process_tree.nodes.values() {
+        for node in self.tabs[i].state.process_tree.nodes.values() {
             if let Some(ref name) = node.image_name {
                 let lc = name.to_lowercase();
                 if lc == "schtasks.exe" || lc == "at.exe" {
@@ -366,20 +464,17 @@ impl SysTraceApp {
                 }
             }
         }
-        self.state.persistence_processes = persistence_processes;
+        self.tabs[i].state.persistence_processes = persistence_processes;
 
-        // Available users from real (non-synthetic) process nodes (sorted).
         let mut user_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for node in self.state.process_tree.nodes.values() {
+        for node in self.tabs[i].state.process_tree.nodes.values() {
             if node.is_synthetic { continue; }
             if let Some(ref user) = node.user {
                 user_set.insert(user.clone());
             }
         }
-        self.state.available_users = user_set.into_iter().collect();
-
-        // Reset the filter UI state.
-        self.state.special_filter = SpecialFilter::default();
+        self.tabs[i].state.available_users = user_set.into_iter().collect();
+        self.tabs[i].state.special_filter = SpecialFilter::default();
     }
 
 
@@ -387,116 +482,22 @@ impl SysTraceApp {
     // Phase 5: Export
     // -----------------------------------------------------------------------
 
-    fn csv_escape(s: &str) -> String {
-        if s.contains(',') || s.contains('"') || s.contains('\n') {
-            format!("\"{}\"", s.replace('"', "\"\""))
-        } else {
-            s.to_owned()
-        }
-    }
-
-    fn json_escape(s: &str) -> String {
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "")
-    }
-
-    fn export_events_csv(&self) {
+    fn export_timeline(&self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("CSV", &["csv"])
-            .set_file_name("systrace_events.csv")
+            .set_file_name("timeline.csv")
             .save_file()
         else {
             return;
         };
-
-        use std::io::Write;
-        let Ok(mut f) = std::fs::File::create(&path) else { return; };
-        let rodeo = &self.state.rodeo;
-        let _ = writeln!(f, "Time,EventID,EventType,Computer,Image,User");
-        for ev in &self.state.event_store.events {
-            let time = ev.time_created.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-            let etype = ev.event_type.display_name();
-            let computer = rodeo.resolve(&ev.computer);
-            let image = ev.image.map(|s| rodeo.resolve(&s).to_owned()).unwrap_or_default();
-            let user = ev.user.map(|s| rodeo.resolve(&s).to_owned()).unwrap_or_default();
-            let _ = writeln!(
-                f,
-                "{},{},{},{},{},{}",
-                Self::csv_escape(&time),
-                ev.event_id,
-                etype,
-                Self::csv_escape(computer),
-                Self::csv_escape(&image),
-                Self::csv_escape(&user),
-            );
-        }
-    }
-
-    fn export_tree_dot(&self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("DOT / Graphviz", &["dot"])
-            .set_file_name("process_tree.dot")
-            .save_file()
-        else {
-            return;
-        };
-
-        use std::io::Write;
-        let Ok(mut f) = std::fs::File::create(&path) else { return; };
-        let _ = writeln!(f, "digraph ProcessTree {{");
-        let _ = writeln!(f, "  rankdir=LR;");
-        let _ = writeln!(f, "  node [shape=box fontname=\"monospace\"];");
-        for (guid, node) in &self.state.process_tree.nodes {
-            let gid: String = guid.iter().map(|b| format!("{b:02x}")).collect();
-            let label = node.image_name.as_deref().unwrap_or("?");
-            let pid = node.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_owned());
-            let style = if node.is_synthetic {
-                " style=dashed"
-            } else if node.end_time.is_some() {
-                " color=gray"
-            } else {
-                ""
-            };
-            let label_esc = label.replace('"', "\\\"");
-            let _ = writeln!(f, "  n{gid} [label=\"{label_esc}\\n({pid})\"{style}];");
-            if let Some(parent_guid) = &node.parent_guid {
-                let pgid: String = parent_guid.iter().map(|b| format!("{b:02x}")).collect();
-                let _ = writeln!(f, "  n{pgid} -> n{gid};");
-            }
-        }
-        let _ = writeln!(f, "}}");
-    }
-
-    fn export_events_json(&self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("JSON", &["json"])
-            .set_file_name("systrace_events.json")
-            .save_file()
-        else {
-            return;
-        };
-
-        use std::io::Write;
-        let Ok(mut f) = std::fs::File::create(&path) else { return; };
-        let rodeo = &self.state.rodeo;
-        let total = self.state.event_store.events.len();
-        let _ = writeln!(f, "[");
-        for (i, ev) in self.state.event_store.events.iter().enumerate() {
-            let time = ev.time_created.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-            let etype = ev.event_type.display_name();
-            let computer = Self::json_escape(rodeo.resolve(&ev.computer));
-            let image = ev.image.map(|s| Self::json_escape(rodeo.resolve(&s))).unwrap_or_default();
-            let user = ev.user.map(|s| Self::json_escape(rodeo.resolve(&s))).unwrap_or_default();
-            let comma = if i < total - 1 { "," } else { "" };
-            let _ = writeln!(
-                f,
-                "  {{\"time\":\"{time}\",\"event_id\":{},\"event_type\":\"{etype}\",\"computer\":\"{computer}\",\"image\":\"{image}\",\"user\":\"{user}\"}}{comma}",
-                ev.event_id,
-            );
-        }
-        let _ = writeln!(f, "]");
+        let _ = panels::timeline::export_timeline_csv(
+            &path,
+            &self.tabs[self.active_tab].state.event_store,
+            &self.tabs[self.active_tab].state.process_tree,
+            &self.tabs[self.active_tab].state.rodeo,
+            &self.tabs[self.active_tab].state.timeline_events,
+            &self.tabs[self.active_tab].state.timeline_event_filter,
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -504,15 +505,16 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn node_passes_event_filter(&self, guid: &ProcessGuid) -> bool {
-        let sf = &self.state.special_filter;
-        let mitre_active = !self.state.mitre_filter.is_empty();
+        let sf = &self.tabs[self.active_tab].state.special_filter;
+        let mitre_active = !self.tabs[self.active_tab].state.mitre_filter.is_empty();
+        let time_active = self.tabs[self.active_tab].state.time_filter_active && self.tabs[self.active_tab].state.time_range_filter.is_some();
 
-        if !sf.any_active() && !mitre_active {
+        if !sf.any_active() && !mitre_active && !time_active {
             return true;
         }
 
         // Look up the node for integrity / user checks.
-        let node = match self.state.process_tree.get(guid) {
+        let node = match self.tabs[self.active_tab].state.process_tree.get(guid) {
             Some(n) => n,
             None => return true, // synthetic/unknown — don't hide
         };
@@ -538,31 +540,45 @@ impl SysTraceApp {
         }
 
         // ── Network Activity (AND) ───────────────────────────────────────────
-        if sf.network && !self.state.network_processes.contains(guid) {
+        if sf.network && !self.tabs[self.active_tab].state.network_processes.contains(guid) {
             return false;
         }
 
         // ── Persistence Activity (AND) ───────────────────────────────────────
-        if sf.persistence && !self.state.persistence_processes.contains(guid) {
+        if sf.persistence && !self.tabs[self.active_tab].state.persistence_processes.contains(guid) {
             return false;
         }
 
         // ── MITRE Techniques (AND) ───────────────────────────────────────────
         if mitre_active {
             let has_match = self
-                .state
+                .tabs[self.active_tab].state
                 .event_store
                 .events_for_process(guid)
                 .iter()
                 .any(|&idx| {
-                    self.state.event_store.events[idx]
+                    self.tabs[self.active_tab].state.event_store.events[idx]
                         .mitre_technique
                         .as_ref()
-                        .map(|m| self.state.mitre_filter.contains(&m.id))
+                        .map(|m| self.tabs[self.active_tab].state.mitre_filter.contains(&m.id))
                         .unwrap_or(false)
                 });
             if !has_match {
                 return false;
+            }
+        }
+
+        // ── Time Range (AND) ─────────────────────────────────────────────────
+        // Synthetic nodes have no known start time — hide them when filter is active.
+        if time_active {
+            if node.is_synthetic {
+                return false;
+            }
+            if let Some((t_from, t_to)) = self.tabs[self.active_tab].state.time_range_filter {
+                // A process passes only if it was *started* within the range.
+                if node.start_time < t_from || node.start_time > t_to {
+                    return false;
+                }
             }
         }
 
@@ -574,7 +590,7 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn expand_all_children(&self, ctx: &egui::Context, guid: ProcessGuid) {
-        let Some(node) = self.state.process_tree.get(&guid) else {
+        let Some(node) = self.tabs[self.active_tab].state.process_tree.get(&guid) else {
             return;
         };
         let children = node.children.clone();
@@ -589,7 +605,7 @@ impl SysTraceApp {
     }
 
     fn set_all_tree_open(&self, ctx: &egui::Context, open: bool) {
-        let guids: Vec<_> = self.state.process_tree.nodes.keys().copied().collect();
+        let guids: Vec<_> = self.tabs[self.active_tab].state.process_tree.nodes.keys().copied().collect();
         for guid in guids {
             let mut cs = egui::collapsing_header::CollapsingState::load_with_default_open(
                 ctx, tree_node_id(guid), false,
@@ -605,7 +621,7 @@ impl SysTraceApp {
         if self.node_passes_event_filter(&guid) {
             return true;
         }
-        let Some(node) = self.state.process_tree.get(&guid) else {
+        let Some(node) = self.tabs[self.active_tab].state.process_tree.get(&guid) else {
             return false;
         };
         let children = node.children.clone();
@@ -614,7 +630,7 @@ impl SysTraceApp {
 
     /// Returns true if any node in the subtree rooted at `guid` matches the filter.
     fn subtree_matches_filter(&self, guid: ProcessGuid, filter: &str) -> bool {
-        let Some(node) = self.state.process_tree.get(&guid) else {
+        let Some(node) = self.tabs[self.active_tab].state.process_tree.get(&guid) else {
             return false;
         };
         let image_lc = node.image_name.as_deref().unwrap_or("").to_lowercase();
@@ -642,13 +658,13 @@ impl SysTraceApp {
         guid: ProcessGuid,
         out: &mut Vec<ProcessGuid>,
     ) {
-        let filter = self.state.search_filter.to_lowercase();
-        let Some(node) = self.state.process_tree.get(&guid) else {
+        let filter = self.tabs[self.active_tab].state.search_filter.to_lowercase();
+        let Some(node) = self.tabs[self.active_tab].state.process_tree.get(&guid) else {
             return;
         };
 
         // Host filter
-        if let Some(host) = &self.state.selected_host {
+        if let Some(host) = &self.tabs[self.active_tab].state.selected_host {
             if &node.computer != host {
                 return;
             }
@@ -692,7 +708,7 @@ impl SysTraceApp {
 
     fn compute_flat_visible(&self, ctx: &egui::Context) -> Vec<ProcessGuid> {
         let mut out = Vec::new();
-        let roots: Vec<_> = self.state.process_tree.roots().to_vec();
+        let roots: Vec<_> = self.tabs[self.active_tab].state.process_tree.roots().to_vec();
         for root in roots {
             self.collect_visible_preorder(ctx, root, &mut out);
         }
@@ -706,38 +722,43 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn render_timeline_tab(&mut self, ui: &mut Ui) {
-        if self.state.event_store.len() == 0 {
+        if self.tabs[self.active_tab].state.event_store.len() == 0 {
             panels::render_empty(ui, "No data loaded \u{2014} open a file first.");
             return;
         }
 
-        if !self.state.timeline_generated {
+        if !self.tabs[self.active_tab].state.timeline_generated {
             panels::render_empty(ui, "Select processes in the tree (checkboxes) and click Generate Timeline.");
             return;
         }
 
-        // Event filter bar
+        // Event filter bar + export
         ui.horizontal(|ui| {
             ui.label("Filter events:");
-            egui::TextEdit::singleline(&mut self.state.timeline_event_filter)
+            egui::TextEdit::singleline(&mut self.tabs[self.active_tab].state.timeline_event_filter)
                 .hint_text("Filter rows\u{2026}")
-                .desired_width(ui.available_width() - 40.0)
+                .desired_width(ui.available_width() - 120.0)
                 .show(ui);
-            if !self.state.timeline_event_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
-                self.state.timeline_event_filter.clear();
+            if !self.tabs[self.active_tab].state.timeline_event_filter.is_empty() && ui.small_button("\u{2715}").clicked() {
+                self.tabs[self.active_tab].state.timeline_event_filter.clear();
+            }
+            if ui.button("Export CSV\u{2026}").clicked() {
+                self.export_timeline();
             }
         });
         ui.separator();
 
-        let events = self.state.timeline_events.clone();
-        let filter = self.state.timeline_event_filter.clone();
+        let events = self.tabs[self.active_tab].state.timeline_events.clone();
+        let filter = self.tabs[self.active_tab].state.timeline_event_filter.clone();
+        let a = self.active_tab;
+        let s = &mut self.tabs[a].state;
         panels::timeline::render_timeline_table(
             ui,
-            &self.state.event_store,
-            &self.state.process_tree,
-            &self.state.rodeo,
+            &s.event_store,
+            &s.process_tree,
+            &s.rodeo,
             &events,
-            &mut self.state.tab_timeline,
+            &mut s.tab_timeline,
             &filter,
         );
     }
@@ -747,6 +768,87 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
     // Rendering
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Tab bar
+    // -----------------------------------------------------------------------
+
+    fn render_tab_bar(&mut self, ui: &mut Ui) {
+        let mut close_idx: Option<usize> = None;
+        let mut open_new = false;
+
+        ui.horizontal(|ui| {
+            let n = self.tabs.len();
+            for i in 0..n {
+                let is_active = i == self.active_tab;
+
+                if self.tabs[i].rename_mode {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.tabs[i].rename_buf)
+                            .desired_width(120.0),
+                    );
+                    if resp.lost_focus()
+                        || ui.input(|inp| inp.key_pressed(egui::Key::Enter))
+                    {
+                        let name = self.tabs[i].rename_buf.clone();
+                        self.tabs[i].display_name = name;
+                        self.tabs[i].rename_mode = false;
+                    } else {
+                        resp.request_focus();
+                    }
+                } else {
+                    let label = self.tabs[i].display_name.clone();
+                    let fill = if is_active {
+                        ui.visuals().selection.bg_fill
+                    } else {
+                        ui.visuals().faint_bg_color
+                    };
+                    egui::Frame::new()
+                        .fill(fill)
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let resp = ui.selectable_label(is_active, &label);
+                                if resp.clicked() {
+                                    self.active_tab = i;
+                                }
+                                if resp.double_clicked() {
+                                    self.tabs[i].rename_buf = label.clone();
+                                    self.tabs[i].rename_mode = true;
+                                }
+                                if ui.small_button("✕").clicked() {
+                                    close_idx = Some(i);
+                                }
+                            });
+                        });
+                    ui.add_space(2.0);
+                }
+            }
+
+            if ui.button("+").on_hover_text("Open file in new tab").clicked() {
+                open_new = true;
+            }
+        });
+
+        if open_new {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Sysmon Logs", &["evtx", "json", "ndjson", "csv"])
+                .pick_file()
+            {
+                self.open_file(path);
+            }
+        }
+
+        if let Some(idx) = close_idx {
+            self.tabs.remove(idx);
+            if self.tabs.is_empty() {
+                self.active_tab = 0;
+            } else {
+                self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            }
+        }
+    }
 
     fn render_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         egui::menu::bar(ui, |ui| {
@@ -762,7 +864,9 @@ impl SysTraceApp {
                 }
 
                 // Recent files submenu
-                let recent = self.state.recent_files.clone();
+                let recent = self.tabs.get(self.active_tab)
+                    .map(|t| t.state.recent_files.clone())
+                    .unwrap_or_default();
                 if !recent.is_empty() {
                     ui.menu_button("Recent Files", |ui| {
                         for path in &recent {
@@ -780,28 +884,14 @@ impl SysTraceApp {
 
                 ui.separator();
 
-                // Export submenu
-                ui.menu_button("Export", |ui| {
-                    if ui.button("Events as CSV…").clicked() {
-                        self.export_events_csv();
-                        ui.close_menu();
-                    }
-                    if ui.button("Events as JSON…").clicked() {
-                        self.export_events_json();
-                        ui.close_menu();
-                    }
-                    if ui.button("Process Tree as DOT…").clicked() {
-                        self.export_tree_dot();
-                        ui.close_menu();
-                    }
-                });
-
-                ui.separator();
-
                 // Theme toggle
-                let theme_label = if self.state.dark_mode { "☀ Light Mode" } else { "🌙 Dark Mode" };
+                let dark = self.tabs.get(self.active_tab).map(|t| t.state.dark_mode).unwrap_or(false);
+                let theme_label = if dark { "☀ Light Mode" } else { "🌙 Dark Mode" };
                 if ui.button(theme_label).clicked() {
-                    self.state.dark_mode = !self.state.dark_mode;
+                    let new_dark = !dark;
+                    for tab in &mut self.tabs {
+                        tab.state.dark_mode = new_dark;
+                    }
                     ui.close_menu();
                 }
 
@@ -811,46 +901,49 @@ impl SysTraceApp {
                 }
             });
 
-            if ui.button("Stats").clicked() {
-                self.state.show_stats = !self.state.show_stats;
-            }
-
-            if ui.button("Help").clicked() {
-                self.state.show_help = !self.state.show_help;
+            if !self.tabs.is_empty() {
+                if ui.button("Stats").clicked() {
+                    self.tabs[self.active_tab].state.show_stats =
+                        !self.tabs[self.active_tab].state.show_stats;
+                }
+                if ui.button("Help").clicked() {
+                    self.tabs[self.active_tab].state.show_help =
+                        !self.tabs[self.active_tab].state.show_help;
+                }
             }
         });
     }
 
     fn render_status_bar(&self, ui: &mut Ui) {
+        let tab = self.tabs.get(self.active_tab);
         ui.horizontal(|ui| {
-            match &self.state.file_metadata {
+            match tab.and_then(|t| t.state.file_metadata.as_ref()) {
                 Some(meta) => {
+                    let fname = tab
+                        .and_then(|t| t.path.as_ref())
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("(unknown)");
                     ui.label(format!(
                         "{}  |  Records: {}  |  Processes: {}",
-                        self.file_path
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("(unknown)"),
-                        meta.total_records,
-                        meta.unique_processes,
+                        fname, meta.total_records, meta.unique_processes,
                     ));
-                    if self.state.parse_error_count > 0 {
-                        ui.separator();
-                        ui.colored_label(
-                            egui::Color32::YELLOW,
-                            format!("⚠ {} parse errors", self.state.parse_error_count),
-                        );
+                    if let Some(t) = tab {
+                        if t.state.parse_error_count > 0 {
+                            ui.separator();
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                format!("⚠ {} parse errors", t.state.parse_error_count),
+                            );
+                        }
                     }
                 }
                 None => {
-                    if let Some(progress) = self.state.loading_progress {
+                    if let Some(progress) = tab.and_then(|t| t.state.loading_progress) {
                         ui.label(format!("Loading… {:.0}%", progress * 100.0));
                         ui.add(egui::ProgressBar::new(progress).desired_width(200.0));
                     } else {
-                        ui.label(
-                            "No file loaded — File › Open to load a Sysmon NDJSON export.",
-                        );
+                        ui.label("No file loaded — File › Open or drag a file here.");
                     }
                 }
             }
@@ -861,7 +954,7 @@ impl SysTraceApp {
         ui.heading("Processes");
 
         // Host selector (only shown when multiple hosts are present)
-        if let Some(meta) = &self.state.file_metadata {
+        if let Some(meta) = &self.tabs[self.active_tab].state.file_metadata {
             if meta.computer_names.len() > 1 {
                 let names: Vec<String> = {
                     let mut v: Vec<String> = meta.computer_names.iter().cloned().collect();
@@ -870,17 +963,17 @@ impl SysTraceApp {
                 };
                 ui.horizontal(|ui| {
                     ui.label("Host:");
-                    let current = self.state.selected_host.clone().unwrap_or_else(|| "All".to_owned());
+                    let current = self.tabs[self.active_tab].state.selected_host.clone().unwrap_or_else(|| "All".to_owned());
                     egui::ComboBox::from_id_salt("host_selector")
                         .selected_text(&current)
                         .show_ui(ui, |ui| {
-                            if ui.selectable_label(self.state.selected_host.is_none(), "All").clicked() {
-                                self.state.selected_host = None;
+                            if ui.selectable_label(self.tabs[self.active_tab].state.selected_host.is_none(), "All").clicked() {
+                                self.tabs[self.active_tab].state.selected_host = None;
                             }
                             for name in &names {
-                                let sel = self.state.selected_host.as_deref() == Some(name.as_str());
+                                let sel = self.tabs[self.active_tab].state.selected_host.as_deref() == Some(name.as_str());
                                 if ui.selectable_label(sel, name).clicked() {
-                                    self.state.selected_host = Some(name.clone());
+                                    self.tabs[self.active_tab].state.selected_host = Some(name.clone());
                                 }
                             }
                         });
@@ -896,39 +989,39 @@ impl SysTraceApp {
         // Search filter row
         ui.horizontal(|ui| {
             ui.label("🔍");
-            egui::TextEdit::singleline(&mut self.state.search_filter)
+            egui::TextEdit::singleline(&mut self.tabs[self.active_tab].state.search_filter)
                 .id(search_id)
                 .hint_text("Search image, PID, user, cmd…")
                 .show(ui);
-            if !self.state.search_filter.is_empty() && ui.small_button("✕").clicked() {
-                self.state.search_filter.clear();
+            if !self.tabs[self.active_tab].state.search_filter.is_empty() && ui.small_button("✕").clicked() {
+                self.tabs[self.active_tab].state.search_filter.clear();
             }
         });
 
-        let is_timeline_mode = self.state.active_tab == TelemetryTab::Timeline;
+        let is_timeline_mode = self.tabs[self.active_tab].state.active_tab == TelemetryTab::Timeline;
 
         if is_timeline_mode {
             // Timeline mode: show selection controls instead of event type filter
             ui.horizontal(|ui| {
                 if ui.small_button("Select All").clicked() {
-                    let filter_lc = self.state.search_filter.to_lowercase();
-                    let guids: Vec<_> = self.state.process_tree.nodes.keys().copied()
+                    let filter_lc = self.tabs[self.active_tab].state.search_filter.to_lowercase();
+                    let guids: Vec<_> = self.tabs[self.active_tab].state.process_tree.nodes.keys().copied()
                         .filter(|g| {
                             if filter_lc.is_empty() { return true; }
                             self.subtree_matches_filter(*g, &filter_lc)
                         })
                         .collect();
-                    self.state.timeline_checked.extend(guids);
+                    self.tabs[self.active_tab].state.timeline_checked.extend(guids);
                 }
                 if ui.small_button("Deselect All").clicked() {
-                    self.state.timeline_checked.clear();
-                    self.state.timeline_generated = false;
-                    self.state.timeline_events.clear();
+                    self.tabs[self.active_tab].state.timeline_checked.clear();
+                    self.tabs[self.active_tab].state.timeline_generated = false;
+                    self.tabs[self.active_tab].state.timeline_events.clear();
                 }
             });
 
             // Generate Timeline button
-            let checked_count = self.state.timeline_checked.len();
+            let checked_count = self.tabs[self.active_tab].state.timeline_checked.len();
             ui.horizontal(|ui| {
                 let btn = egui::Button::new(
                     egui::RichText::new(format!("Generate Timeline ({checked_count} selected)"))
@@ -940,16 +1033,16 @@ impl SysTraceApp {
                 );
                 if ui.add_enabled(checked_count > 0, btn).clicked() {
                     let mut indices: Vec<usize> = Vec::new();
-                    for &guid in &self.state.timeline_checked {
-                        indices.extend(self.state.event_store.events_for_process(&guid));
+                    for &guid in &self.tabs[self.active_tab].state.timeline_checked {
+                        indices.extend(self.tabs[self.active_tab].state.event_store.events_for_process(&guid));
                     }
                     indices.sort_unstable();
                     indices.dedup();
-                    indices.sort_by_key(|&i| self.state.event_store.events[i].time_created);
-                    self.state.timeline_events = indices;
-                    self.state.timeline_generated = true;
-                    self.state.tab_timeline.selected_row = None;
-                    self.state.timeline_event_filter.clear();
+                    indices.sort_by_key(|&i| self.tabs[self.active_tab].state.event_store.events[i].time_created);
+                    self.tabs[self.active_tab].state.timeline_events = indices;
+                    self.tabs[self.active_tab].state.timeline_generated = true;
+                    self.tabs[self.active_tab].state.tab_timeline.selected_row = None;
+                    self.tabs[self.active_tab].state.timeline_event_filter.clear();
                 }
             });
         }
@@ -958,9 +1051,10 @@ impl SysTraceApp {
 
         // ── Toolbar row: Expand All / Collapse All / Filter toggle ───────────
         {
-            let sf_count = self.state.special_filter.active_category_count();
-            let mitre_count = if self.state.mitre_filter.is_empty() { 0 } else { 1 };
-            let total_active = sf_count + mitre_count;
+            let sf_count = self.tabs[self.active_tab].state.special_filter.active_category_count();
+            let mitre_count = if self.tabs[self.active_tab].state.mitre_filter.is_empty() { 0 } else { 1 };
+            let time_count = if self.tabs[self.active_tab].state.time_filter_active { 1 } else { 0 };
+            let total_active = sf_count + mitre_count + time_count;
             let any_active = total_active > 0;
 
             ui.horizontal(|ui| {
@@ -976,58 +1070,59 @@ impl SysTraceApp {
                     "Filter".to_string()
                 };
                 let mut btn = egui::Button::new(label);
-                if self.state.show_filters || any_active {
+                if self.tabs[self.active_tab].state.show_filters || any_active {
                     btn = btn.fill(ui.visuals().selection.bg_fill);
                 }
                 if ui.add(btn).clicked() {
-                    self.state.show_filters = !self.state.show_filters;
+                    self.tabs[self.active_tab].state.show_filters = !self.tabs[self.active_tab].state.show_filters;
                 }
                 if any_active && ui.small_button("✕").clicked() {
-                    self.state.special_filter = SpecialFilter::default();
-                    self.state.mitre_filter.clear();
+                    self.tabs[self.active_tab].state.special_filter = SpecialFilter::default();
+                    self.tabs[self.active_tab].state.mitre_filter.clear();
+                    self.tabs[self.active_tab].state.time_filter_active = false;
                 }
             });
 
-            if self.state.show_filters {
+            if self.tabs[self.active_tab].state.show_filters {
                 ui.indent("filter_panel", |ui| {
                     // ── Integrity Level ───────────────────────────────────
                     egui::CollapsingHeader::new("Integrity Level")
                         .default_open(false)
                         .show(ui, |ui| {
-                            ui.checkbox(&mut self.state.special_filter.integrity_system, "System");
-                            ui.checkbox(&mut self.state.special_filter.integrity_high,   "High");
-                            ui.checkbox(&mut self.state.special_filter.integrity_medium, "Medium");
-                            ui.checkbox(&mut self.state.special_filter.integrity_low,    "Low");
-                            if self.state.special_filter.any_integrity_active()
+                            ui.checkbox(&mut self.tabs[self.active_tab].state.special_filter.integrity_system, "System");
+                            ui.checkbox(&mut self.tabs[self.active_tab].state.special_filter.integrity_high,   "High");
+                            ui.checkbox(&mut self.tabs[self.active_tab].state.special_filter.integrity_medium, "Medium");
+                            ui.checkbox(&mut self.tabs[self.active_tab].state.special_filter.integrity_low,    "Low");
+                            if self.tabs[self.active_tab].state.special_filter.any_integrity_active()
                                 && ui.small_button("Clear").clicked()
                             {
-                                self.state.special_filter.integrity_system = false;
-                                self.state.special_filter.integrity_high   = false;
-                                self.state.special_filter.integrity_medium = false;
-                                self.state.special_filter.integrity_low    = false;
+                                self.tabs[self.active_tab].state.special_filter.integrity_system = false;
+                                self.tabs[self.active_tab].state.special_filter.integrity_high   = false;
+                                self.tabs[self.active_tab].state.special_filter.integrity_medium = false;
+                                self.tabs[self.active_tab].state.special_filter.integrity_low    = false;
                             }
                         });
 
                     // ── User ──────────────────────────────────────────────
-                    if !self.state.available_users.is_empty() {
-                        let users: Vec<String> = self.state.available_users.clone();
+                    if !self.tabs[self.active_tab].state.available_users.is_empty() {
+                        let users: Vec<String> = self.tabs[self.active_tab].state.available_users.clone();
                         egui::CollapsingHeader::new("User")
                             .default_open(false)
                             .show(ui, |ui| {
                                 for user in &users {
-                                    let mut checked = self.state.special_filter.users_checked.contains(user);
+                                    let mut checked = self.tabs[self.active_tab].state.special_filter.users_checked.contains(user);
                                     if ui.checkbox(&mut checked, user.as_str()).changed() {
                                         if checked {
-                                            self.state.special_filter.users_checked.insert(user.clone());
+                                            self.tabs[self.active_tab].state.special_filter.users_checked.insert(user.clone());
                                         } else {
-                                            self.state.special_filter.users_checked.remove(user);
+                                            self.tabs[self.active_tab].state.special_filter.users_checked.remove(user);
                                         }
                                     }
                                 }
-                                if !self.state.special_filter.users_checked.is_empty()
+                                if !self.tabs[self.active_tab].state.special_filter.users_checked.is_empty()
                                     && ui.small_button("Clear").clicked()
                                 {
-                                    self.state.special_filter.users_checked.clear();
+                                    self.tabs[self.active_tab].state.special_filter.users_checked.clear();
                                 }
                             });
                     }
@@ -1036,36 +1131,107 @@ impl SysTraceApp {
                     egui::CollapsingHeader::new("Activity")
                         .default_open(false)
                         .show(ui, |ui| {
-                            ui.checkbox(&mut self.state.special_filter.network,     "Network Connection");
-                            ui.checkbox(&mut self.state.special_filter.persistence, "Persistence Activity");
-                            if (self.state.special_filter.network || self.state.special_filter.persistence)
+                            ui.checkbox(&mut self.tabs[self.active_tab].state.special_filter.network,     "Network Connection");
+                            ui.checkbox(&mut self.tabs[self.active_tab].state.special_filter.persistence, "Persistence Activity");
+                            if (self.tabs[self.active_tab].state.special_filter.network || self.tabs[self.active_tab].state.special_filter.persistence)
                                 && ui.small_button("Clear").clicked()
                             {
-                                self.state.special_filter.network     = false;
-                                self.state.special_filter.persistence = false;
+                                self.tabs[self.active_tab].state.special_filter.network     = false;
+                                self.tabs[self.active_tab].state.special_filter.persistence = false;
                             }
                         });
 
                     // ── MITRE Techniques ──────────────────────────────────
-                    if !self.state.available_mitre.is_empty() {
-                        let mitre_ids: Vec<String> = self.state.available_mitre.iter().cloned().collect();
+                    if !self.tabs[self.active_tab].state.available_mitre.is_empty() {
+                        let mitre_ids: Vec<String> = self.tabs[self.active_tab].state.available_mitre.iter().cloned().collect();
                         egui::CollapsingHeader::new("MITRE Techniques")
                             .default_open(false)
                             .show(ui, |ui| {
                                 for id in &mitre_ids {
-                                    let mut checked = self.state.mitre_filter.contains(id);
+                                    let mut checked = self.tabs[self.active_tab].state.mitre_filter.contains(id);
                                     if ui.checkbox(&mut checked, id.as_str()).changed() {
                                         if checked {
-                                            self.state.mitre_filter.insert(id.clone());
+                                            self.tabs[self.active_tab].state.mitre_filter.insert(id.clone());
                                         } else {
-                                            self.state.mitre_filter.remove(id);
+                                            self.tabs[self.active_tab].state.mitre_filter.remove(id);
                                         }
                                     }
                                 }
-                                if !self.state.mitre_filter.is_empty()
+                                if !self.tabs[self.active_tab].state.mitre_filter.is_empty()
                                     && ui.small_button("Clear All").clicked()
                                 {
-                                    self.state.mitre_filter.clear();
+                                    self.tabs[self.active_tab].state.mitre_filter.clear();
+                                }
+                            });
+                    }
+
+                    // ── Time Range ────────────────────────────────────────
+                    if !self.tabs[self.active_tab].state.available_dates.is_empty() {
+                        let n_dates = self.tabs[self.active_tab].state.available_dates.len();
+                        egui::CollapsingHeader::new("Time Range")
+                            .default_open(self.tabs[self.active_tab].state.time_filter_active)
+                            .show(ui, |ui| {
+                                ui.checkbox(&mut self.tabs[self.active_tab].state.time_filter_active, "Enable");
+                                ui.label(egui::RichText::new("Filters by process start time").small().weak());
+                                if self.tabs[self.active_tab].state.time_filter_active {
+                                    // Clamp indices to valid range (e.g. after new file load)
+                                    self.tabs[self.active_tab].state.time_filter_from_date_idx = self.tabs[self.active_tab].state.time_filter_from_date_idx.min(n_dates - 1);
+                                    self.tabs[self.active_tab].state.time_filter_to_date_idx   = self.tabs[self.active_tab].state.time_filter_to_date_idx.min(n_dates - 1);
+
+                                    // From row
+                                    ui.horizontal(|ui| {
+                                        ui.label("From");
+                                        let from_label = self.tabs[self.active_tab].state.available_dates[self.tabs[self.active_tab].state.time_filter_from_date_idx]
+                                            .format("%Y-%m-%d").to_string();
+                                        egui::ComboBox::from_id_salt("tf_from_date")
+                                            .selected_text(&from_label)
+                                            .width(110.0)
+                                            .show_ui(ui, |ui| {
+                                                for i in 0..n_dates {
+                                                    let lbl = self.tabs[self.active_tab].state.available_dates[i].format("%Y-%m-%d").to_string();
+                                                    ui.selectable_value(&mut self.tabs[self.active_tab].state.time_filter_from_date_idx, i, lbl);
+                                                }
+                                            });
+                                        ui.add(egui::DragValue::new(&mut self.tabs[self.active_tab].state.time_filter_from_hm.0).range(0..=23).suffix("h"));
+                                        ui.add(egui::DragValue::new(&mut self.tabs[self.active_tab].state.time_filter_from_hm.1).range(0..=59).suffix("m"));
+                                    });
+
+                                    // To row
+                                    ui.horizontal(|ui| {
+                                        ui.label("To      ");
+                                        let to_label = self.tabs[self.active_tab].state.available_dates[self.tabs[self.active_tab].state.time_filter_to_date_idx]
+                                            .format("%Y-%m-%d").to_string();
+                                        egui::ComboBox::from_id_salt("tf_to_date")
+                                            .selected_text(&to_label)
+                                            .width(110.0)
+                                            .show_ui(ui, |ui| {
+                                                for i in 0..n_dates {
+                                                    let lbl = self.tabs[self.active_tab].state.available_dates[i].format("%Y-%m-%d").to_string();
+                                                    ui.selectable_value(&mut self.tabs[self.active_tab].state.time_filter_to_date_idx, i, lbl);
+                                                }
+                                            });
+                                        ui.add(egui::DragValue::new(&mut self.tabs[self.active_tab].state.time_filter_to_hm.0).range(0..=23).suffix("h"));
+                                        ui.add(egui::DragValue::new(&mut self.tabs[self.active_tab].state.time_filter_to_hm.1).range(0..=59).suffix("m"));
+                                    });
+
+                                    // Enforce from <= to (compare as minutes-since-epoch-day)
+                                    let from_total = self.tabs[self.active_tab].state.time_filter_from_date_idx as u32 * 1440
+                                        + self.tabs[self.active_tab].state.time_filter_from_hm.0 * 60
+                                        + self.tabs[self.active_tab].state.time_filter_from_hm.1;
+                                    let to_total = self.tabs[self.active_tab].state.time_filter_to_date_idx as u32 * 1440
+                                        + self.tabs[self.active_tab].state.time_filter_to_hm.0 * 60
+                                        + self.tabs[self.active_tab].state.time_filter_to_hm.1;
+                                    if from_total > to_total {
+                                        self.tabs[self.active_tab].state.time_filter_to_date_idx = self.tabs[self.active_tab].state.time_filter_from_date_idx;
+                                        self.tabs[self.active_tab].state.time_filter_to_hm = self.tabs[self.active_tab].state.time_filter_from_hm;
+                                    }
+
+                                    if ui.small_button("Reset").clicked() {
+                                        self.tabs[self.active_tab].state.time_filter_from_date_idx = 0;
+                                        self.tabs[self.active_tab].state.time_filter_from_hm = (0, 0);
+                                        self.tabs[self.active_tab].state.time_filter_to_date_idx = n_dates - 1;
+                                        self.tabs[self.active_tab].state.time_filter_to_hm = (23, 59);
+                                    }
                                 }
                             });
                     }
@@ -1085,10 +1251,10 @@ impl SysTraceApp {
                 )
             });
             if down || up {
-                let flat = self.state.flat_visible.clone();
+                let flat = self.tabs[self.active_tab].state.flat_visible.clone();
                 if !flat.is_empty() {
                     let current_idx = self
-                        .state
+                        .tabs[self.active_tab].state
                         .selected_process
                         .and_then(|sel| flat.iter().position(|&g| g == sel));
                     let next_idx = match current_idx {
@@ -1102,7 +1268,7 @@ impl SysTraceApp {
                         }
                     };
                     let next_guid = flat[next_idx];
-                    if self.state.selected_process != Some(next_guid) {
+                    if self.tabs[self.active_tab].state.selected_process != Some(next_guid) {
                         self.select_process(next_guid);
                     }
                 }
@@ -1117,13 +1283,13 @@ impl SysTraceApp {
             ui.ctx().memory_mut(|m| m.request_focus(search_id));
         }
 
-        if self.state.loading_progress.is_some() {
+        if self.tabs[self.active_tab].state.loading_progress.is_some() {
             ui.label("Loading…");
             return;
         }
 
-        if self.state.process_tree.is_empty() {
-            if self.state.file_metadata.is_some() {
+        if self.tabs[self.active_tab].state.process_tree.is_empty() {
+            if self.tabs[self.active_tab].state.file_metadata.is_some() {
                 ui.label("No process create events found.");
             } else {
                 ui.label("(empty)");
@@ -1131,7 +1297,7 @@ impl SysTraceApp {
             return;
         }
 
-        let roots: Vec<_> = self.state.process_tree.roots().to_vec();
+        let roots: Vec<_> = self.tabs[self.active_tab].state.process_tree.roots().to_vec();
         let ctx = ui.ctx().clone();
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
@@ -1142,11 +1308,11 @@ impl SysTraceApp {
             });
 
         // Rebuild flat visible list for keyboard navigation (post-render so CollapsingState is up to date)
-        self.state.flat_visible = self.compute_flat_visible(&ctx);
+        self.tabs[self.active_tab].state.flat_visible = self.compute_flat_visible(&ctx);
     }
 
     fn render_tree_node(&mut self, ui: &mut Ui, guid: ProcessGuid) {
-        let node = match self.state.process_tree.get(&guid) {
+        let node = match self.tabs[self.active_tab].state.process_tree.get(&guid) {
             Some(n) => n,
             None => return,
         };
@@ -1171,14 +1337,14 @@ impl SysTraceApp {
         // node borrow on process_tree ends here
 
         // Host filter (Phase 5: multi-host support)
-        if let Some(host) = &self.state.selected_host {
+        if let Some(host) = &self.tabs[self.active_tab].state.selected_host {
             if computer != *host {
                 return;
             }
         }
 
         // Text filter — exact match, no subtree fallback
-        let filter = self.state.search_filter.to_lowercase();
+        let filter = self.tabs[self.active_tab].state.search_filter.to_lowercase();
         if !filter.is_empty() && !self.subtree_matches_filter(guid, &filter) {
             return;
         }
@@ -1198,7 +1364,7 @@ impl SysTraceApp {
 
         // Determine injection target and system user for color priority
         let is_injection_target =
-            !self.state.event_store.events_targeting_process(&guid).is_empty();
+            !self.tabs[self.active_tab].state.event_store.events_targeting_process(&guid).is_empty();
         let is_system = user_str.to_uppercase().contains("SYSTEM");
 
         // Color priority: synthetic > injection_target > system > terminated > normal
@@ -1216,13 +1382,15 @@ impl SysTraceApp {
 
         // MITRE badge: check if any event for this process has a MITRE technique
         let has_mitre = self
-            .state
+            .tabs[self.active_tab].state
             .event_store
             .events_for_process(&guid)
             .iter()
-            .any(|&idx| self.state.event_store.events[idx].mitre_technique.is_some());
+            .any(|&idx| self.tabs[self.active_tab].state.event_store.events[idx].mitre_technique.is_some());
         // Bookmark indicator
-        let is_bookmarked = self.state.bookmarks.contains_key(&guid);
+        let is_bookmarked = self.tabs[self.active_tab].state.bookmarks.contains_key(&guid);
+        // Sigma match indicator
+        let has_sigma_match = self.tabs[self.active_tab].state.sigma_match_guids.contains(&guid);
 
         let label = {
             let base = if is_synthetic {
@@ -1232,12 +1400,13 @@ impl SysTraceApp {
             };
             let mut l = base;
             if has_mitre { l = format!("⚑ {l}"); }
+            if has_sigma_match { l = format!("⚠ {l}"); }
             if is_bookmarked { l = format!("🔖 {l}"); }
             l
         };
 
-        let is_selected = self.state.selected_process == Some(guid);
-        let should_scroll = self.state.scroll_to_selected && is_selected;
+        let is_selected = self.tabs[self.active_tab].state.selected_process == Some(guid);
+        let should_scroll = self.tabs[self.active_tab].state.scroll_to_selected && is_selected;
 
         // GUID as hex string for clipboard copy
         let guid_hex: String = guid.iter().map(|b| format!("{b:02x}")).collect();
@@ -1245,18 +1414,18 @@ impl SysTraceApp {
 
         // --- Render node (leaf vs collapsible) ---
         let do_expand = Cell::new(false);
-        let is_timeline_mode = self.state.active_tab == TelemetryTab::Timeline;
+        let is_timeline_mode = self.tabs[self.active_tab].state.active_tab == TelemetryTab::Timeline;
 
         if children.is_empty() {
             ui.horizontal(|ui| {
                 // Timeline checkbox (before the label)
                 if is_timeline_mode {
-                    let mut checked = self.state.timeline_checked.contains(&guid);
+                    let mut checked = self.tabs[self.active_tab].state.timeline_checked.contains(&guid);
                     if ui.checkbox(&mut checked, "").changed() {
                         if checked {
-                            self.state.timeline_checked.insert(guid);
+                            self.tabs[self.active_tab].state.timeline_checked.insert(guid);
                         } else {
-                            self.state.timeline_checked.remove(&guid);
+                            self.tabs[self.active_tab].state.timeline_checked.remove(&guid);
                         }
                     }
                 }
@@ -1267,7 +1436,7 @@ impl SysTraceApp {
                 }
                 if should_scroll {
                     resp.scroll_to_me(Some(egui::Align::Center));
-                    self.state.scroll_to_selected = false;
+                    self.tabs[self.active_tab].state.scroll_to_selected = false;
                 }
                 resp.on_hover_ui(|ui| {
                     ui.label(format!("Image: {image_full}"));
@@ -1297,12 +1466,12 @@ impl SysTraceApp {
             cs.show_header(ui, |ui| {
                 // Timeline checkbox (before the label)
                 if is_timeline_mode {
-                    let mut checked = self.state.timeline_checked.contains(&guid);
+                    let mut checked = self.tabs[self.active_tab].state.timeline_checked.contains(&guid);
                     if ui.checkbox(&mut checked, "").changed() {
                         if checked {
-                            self.state.timeline_checked.insert(guid);
+                            self.tabs[self.active_tab].state.timeline_checked.insert(guid);
                         } else {
-                            self.state.timeline_checked.remove(&guid);
+                            self.tabs[self.active_tab].state.timeline_checked.remove(&guid);
                         }
                     }
                 }
@@ -1313,7 +1482,7 @@ impl SysTraceApp {
                 }
                 if should_scroll {
                     resp.scroll_to_me(Some(egui::Align::Center));
-                    self.state.scroll_to_selected = false;
+                    self.tabs[self.active_tab].state.scroll_to_selected = false;
                 }
                 resp.on_hover_ui(|ui| {
                     ui.label(format!("Image: {image_full}"));
@@ -1365,6 +1534,7 @@ impl SysTraceApp {
             TelemetryTab::Injection,
             TelemetryTab::DriversModules,
             TelemetryTab::Detection,
+            TelemetryTab::Sigma,
             TelemetryTab::Timeline,
         ];
         let (tab_forward, tab_backward) = ui.ctx().input(|i| {
@@ -1374,13 +1544,13 @@ impl SysTraceApp {
             )
         });
         if tab_forward || tab_backward {
-            if let Some(idx) = tabs.iter().position(|&t| t == self.state.active_tab) {
+            if let Some(idx) = tabs.iter().position(|&t| t == self.tabs[self.active_tab].state.active_tab) {
                 let next = if tab_forward {
                     (idx + 1).rem_euclid(tabs.len())
                 } else {
                     (idx + tabs.len() - 1).rem_euclid(tabs.len())
                 };
-                self.state.active_tab = tabs[next];
+                self.tabs[self.active_tab].state.active_tab = tabs[next];
             }
         }
 
@@ -1398,33 +1568,54 @@ impl SysTraceApp {
                 (TelemetryTab::Timeline, "Timeline"),
             ] {
                 if ui
-                    .selectable_label(self.state.active_tab == tab, label)
+                    .selectable_label(self.tabs[self.active_tab].state.active_tab == tab, label)
                     .clicked()
                 {
-                    self.state.active_tab = tab;
+                    self.tabs[self.active_tab].state.active_tab = tab;
                 }
+            }
+            // Sigma tab — show match count badge
+            let sigma_label = if self.tabs[self.active_tab].state.sigma_matches.is_empty() {
+                "Sigma".to_owned()
+            } else {
+                format!("⚠ Sigma ({})", self.tabs[self.active_tab].state.sigma_matches.len())
+            };
+            let sigma_color = if !self.tabs[self.active_tab].state.sigma_matches.is_empty() {
+                egui::Color32::from_rgb(220, 100, 60)
+            } else {
+                ui.style().visuals.text_color()
+            };
+            if ui
+                .selectable_label(
+                    self.tabs[self.active_tab].state.active_tab == TelemetryTab::Sigma,
+                    egui::RichText::new(sigma_label).color(sigma_color).strong(),
+                )
+                .clicked()
+            {
+                self.tabs[self.active_tab].state.active_tab = TelemetryTab::Sigma;
             }
         });
 
-        // Global telemetry filter bar (shown for non-Overview, non-Hunt tabs)
-        if self.state.active_tab != TelemetryTab::Overview
-            && self.state.active_tab != TelemetryTab::Timeline
+        // Global telemetry filter bar (shown for non-Overview, non-Timeline tabs)
+        if self.tabs[self.active_tab].state.active_tab != TelemetryTab::Overview
+            && self.tabs[self.active_tab].state.active_tab != TelemetryTab::Timeline
         {
             ui.horizontal(|ui| {
                 ui.label("🔍");
-                egui::TextEdit::singleline(&mut self.state.telemetry_filter)
+                egui::TextEdit::singleline(&mut self.tabs[self.active_tab].state.telemetry_filter)
                     .hint_text("Filter rows…")
                     .show(ui);
-                if !self.state.telemetry_filter.is_empty() && ui.small_button("✕").clicked() {
-                    self.state.telemetry_filter.clear();
+                if !self.tabs[self.active_tab].state.telemetry_filter.is_empty() && ui.small_button("✕").clicked() {
+                    self.tabs[self.active_tab].state.telemetry_filter.clear();
                 }
             });
+
         }
 
         ui.separator();
 
         // Show loading progress bar in central panel if loading
-        if let Some(progress) = self.state.loading_progress {
+        if let Some(progress) = self.tabs[self.active_tab].state.loading_progress {
             ui.vertical_centered(|ui| {
                 ui.add_space(60.0);
                 ui.heading("Loading file…");
@@ -1435,7 +1626,7 @@ impl SysTraceApp {
                         .show_percentage(),
                 );
                 ui.add_space(8.0);
-                let events = self.state.event_store.len();
+                let events = self.tabs[self.active_tab].state.event_store.len();
                 if events > 0 {
                     ui.label(format!("{events} events ingested so far"));
                 }
@@ -1444,107 +1635,131 @@ impl SysTraceApp {
         }
 
         // Clone filter + time_range to avoid borrow conflict with &mut self in panel calls
-        let filter = self.state.telemetry_filter.clone();
-        let time_range = self.state.time_range_filter;
+        let filter = self.tabs[self.active_tab].state.telemetry_filter.clone();
+        let time_range = self.tabs[self.active_tab].state.time_range_filter;
 
-        match self.state.active_tab {
+        let active_telemetry_tab = self.tabs[self.active_tab].state.active_tab;
+        match active_telemetry_tab {
             TelemetryTab::Overview => self.render_overview(ui),
             TelemetryTab::Network => {
-                if let Some(guid) = self.state.selected_process {
-                    panels::network::render_network(
-                        ui,
-                        &self.state.event_store,
-                        guid,
-                        &mut self.state.tab_network,
-                        &filter,
-                        time_range,
-                    );
-                } else {
-                    panels::render_no_selection(ui);
-                }
+                let a = self.active_tab;
+                if let Some(guid) = self.tabs[a].state.selected_process {
+                    let s = &mut self.tabs[a].state;
+                    panels::network::render_network(ui, &s.event_store, guid, &mut s.tab_network, &filter, time_range);
+                } else { panels::render_no_selection(ui); }
             }
             TelemetryTab::FileActivity => {
-                if let Some(guid) = self.state.selected_process {
-                    panels::file_activity::render_file_activity(
-                        ui,
-                        &self.state.event_store,
-                        guid,
-                        &mut self.state.tab_files,
-                        &filter,
-                        time_range,
-                    );
-                } else {
-                    panels::render_no_selection(ui);
-                }
+                let a = self.active_tab;
+                if let Some(guid) = self.tabs[a].state.selected_process {
+                    let s = &mut self.tabs[a].state;
+                    panels::file_activity::render_file_activity(ui, &s.event_store, guid, &mut s.tab_files, &filter, time_range);
+                } else { panels::render_no_selection(ui); }
             }
             TelemetryTab::Registry => {
-                if let Some(guid) = self.state.selected_process {
-                    panels::registry::render_registry(
-                        ui,
-                        &self.state.event_store,
-                        guid,
-                        &mut self.state.tab_registry,
-                        &filter,
-                        time_range,
-                    );
-                } else {
-                    panels::render_no_selection(ui);
-                }
+                let a = self.active_tab;
+                if let Some(guid) = self.tabs[a].state.selected_process {
+                    let s = &mut self.tabs[a].state;
+                    panels::registry::render_registry(ui, &s.event_store, guid, &mut s.tab_registry, &filter, time_range);
+                } else { panels::render_no_selection(ui); }
             }
             TelemetryTab::Pipes => {
-                if let Some(guid) = self.state.selected_process {
-                    panels::pipes::render_pipes(
-                        ui,
-                        &self.state.event_store,
-                        guid,
-                        &mut self.state.tab_pipes,
-                        &filter,
-                        time_range,
-                    );
-                } else {
-                    panels::render_no_selection(ui);
-                }
+                let a = self.active_tab;
+                if let Some(guid) = self.tabs[a].state.selected_process {
+                    let s = &mut self.tabs[a].state;
+                    panels::pipes::render_pipes(ui, &s.event_store, guid, &mut s.tab_pipes, &filter, time_range);
+                } else { panels::render_no_selection(ui); }
             }
             TelemetryTab::Injection => {
-                if let Some(guid) = self.state.selected_process {
-                    panels::injection::render_injection(
-                        ui,
-                        &self.state.event_store,
-                        guid,
-                        &mut self.state.tab_injection,
-                        &filter,
-                        time_range,
-                    );
-                } else {
-                    panels::render_no_selection(ui);
-                }
+                let a = self.active_tab;
+                if let Some(guid) = self.tabs[a].state.selected_process {
+                    let s = &mut self.tabs[a].state;
+                    panels::injection::render_injection(ui, &s.event_store, guid, &mut s.tab_injection, &filter, time_range);
+                } else { panels::render_no_selection(ui); }
             }
             TelemetryTab::DriversModules => {
-                if let Some(guid) = self.state.selected_process {
-                    panels::drivers::render_drivers(
-                        ui,
-                        &self.state.event_store,
-                        guid,
-                        &mut self.state.tab_drivers,
-                        &filter,
-                        time_range,
-                    );
-                } else {
-                    panels::render_no_selection(ui);
-                }
+                let a = self.active_tab;
+                if let Some(guid) = self.tabs[a].state.selected_process {
+                    let s = &mut self.tabs[a].state;
+                    panels::drivers::render_drivers(ui, &s.event_store, guid, &mut s.tab_drivers, &filter, time_range);
+                } else { panels::render_no_selection(ui); }
             }
             TelemetryTab::Detection => {
-                if let Some(guid) = self.state.selected_process {
-                    panels::detection::render_detection_table(
+                let a = self.active_tab;
+                if let Some(guid) = self.tabs[a].state.selected_process {
+                    let s = &mut self.tabs[a].state;
+                    panels::detection::render_detection_table(ui, &s.event_store, guid, &mut s.tab_detection, &filter, time_range);
+                } else { panels::render_no_selection(ui); }
+            }
+            TelemetryTab::Sigma => {
+                // ── Sigma toolbar ─────────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    if ui.button("📄 Import Rule").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Sigma Rules", &["yml", "yaml"])
+                            .pick_file()
+                        {
+                            self.load_sigma_rules_from_paths(std::iter::once(path.clone()));
+                            self.tabs[self.active_tab].state.sigma_rules_label = path
+                                .file_name()
+                                .map(|n| format!("{} rule(s) from {}", self.tabs[self.active_tab].state.sigma_rules.len(), n.to_string_lossy()))
+                                .unwrap_or_default();
+                        }
+                    }
+                    if ui.button("📁 Import Folder").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            let paths = collect_sigma_files(&folder);
+                            let count = paths.len();
+                            self.load_sigma_rules_from_paths(paths.into_iter());
+                            self.tabs[self.active_tab].state.sigma_rules_label = format!(
+                                "{} rule(s) from {}",
+                                self.tabs[self.active_tab].state.sigma_rules.len(),
+                                folder.display()
+                            );
+                            let _ = count;
+                        }
+                    }
+                    if !self.tabs[self.active_tab].state.sigma_rules.is_empty() && ui.button("✕ Clear").clicked() {
+                        self.tabs[self.active_tab].state.sigma_rules.clear();
+                        self.tabs[self.active_tab].state.sigma_rules_label.clear();
+                        self.tabs[self.active_tab].state.sigma_matches.clear();
+                        self.tabs[self.active_tab].state.sigma_match_guids.clear();
+                    }
+                    if !self.tabs[self.active_tab].state.sigma_rules_label.is_empty() {
+                        ui.separator();
+                        ui.weak(&self.tabs[self.active_tab].state.sigma_rules_label);
+                    }
+                });
+                ui.separator();
+
+                // Build process name lookup closure using cloned data to avoid borrow conflicts.
+                let a = self.active_tab;
+                let sigma_matches_cl = self.tabs[a].state.sigma_matches.clone();
+                let process_names: Vec<String> = (0..sigma_matches_cl.len()).map(|idx| {
+                    let m = &sigma_matches_cl[idx];
+                    m.process_guid
+                        .and_then(|g| self.tabs[a].state.process_tree.get(&g))
+                        .and_then(|n| n.image_name.clone().or_else(|| n.image.clone()))
+                        .unwrap_or_else(|| "-".to_owned())
+                }).collect();
+                let process_name_fn = |idx: usize| -> String { process_names[idx].clone() };
+
+                let navigate = {
+                    let s = &mut self.tabs[a].state;
+                    panels::sigma::render_sigma(
                         ui,
-                        &self.state.event_store,
-                        guid,
-                        &mut self.state.tab_detection,
+                        &s.sigma_matches,
+                        &mut s.tab_sigma,
                         &filter,
                         time_range,
-                    );
-                } else {
-                    panels::render_no_selection(ui);
+                        &process_name_fn,
+                        s.sigma_rules.is_empty(),
+                    )
+                };
+                // Navigate to matched process on click
+                if let Some(match_idx) = navigate {
+                    if let Some(guid) = self.tabs[a].state.sigma_matches[match_idx].process_guid {
+                        self.select_process(guid);
+                    }
                 }
             }
             TelemetryTab::Timeline => {
@@ -1554,7 +1769,7 @@ impl SysTraceApp {
     }
 
     fn render_overview(&mut self, ui: &mut Ui) {
-        let Some(guid) = self.state.selected_process else {
+        let Some(guid) = self.tabs[self.active_tab].state.selected_process else {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
                 ui.label("Select a process in the tree on the left.");
@@ -1568,7 +1783,7 @@ impl SysTraceApp {
             ov_image, ov_pid, ov_guid_str, ov_cmdline, ov_user, ov_integrity, ov_logon_id,
             ov_computer, ov_start, ov_end, ov_hashes, ov_parent_image, ov_parent_pid,
             ov_file_version, ov_description, ov_product, ov_company, ov_original_file_name,
-        ) = match self.state.process_tree.get(&guid) {
+        ) = match self.tabs[self.active_tab].state.process_tree.get(&guid) {
             None => return,
             Some(node) => (
                 node.image.clone().unwrap_or_else(|| "-".to_owned()),
@@ -1720,7 +1935,7 @@ impl SysTraceApp {
 
                         for (name, ids_str, ids) in categories {
                             let n = self
-                                .state
+                                .tabs[self.active_tab].state
                                 .event_store
                                 .events_for_process_and_types(&guid, ids)
                                 .len();
@@ -1737,12 +1952,12 @@ impl SysTraceApp {
 
                 // MITRE ATT&CK annotations
                 let mitre_events: Vec<_> = self
-                    .state
+                    .tabs[self.active_tab].state
                     .event_store
                     .events_for_process(&guid)
                     .iter()
                     .filter_map(|&idx| {
-                        let ev = &self.state.event_store.events[idx];
+                        let ev = &self.tabs[self.active_tab].state.event_store.events[idx];
                         ev.mitre_technique.as_ref().map(|mt| (ev.event_id, mt.id.clone(), mt.name.clone()))
                     })
                     .collect();
@@ -1767,12 +1982,12 @@ impl SysTraceApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.heading("Notes");
-                    if self.state.bookmarks.contains_key(&guid) {
+                    if self.tabs[self.active_tab].state.bookmarks.contains_key(&guid) {
                         ui.label("🔖");
                     }
                 });
                 ui.add_space(4.0);
-                let note = self.state.bookmarks.entry(guid).or_default();
+                let note = self.tabs[self.active_tab].state.bookmarks.entry(guid).or_default();
                 ui.add(
                     egui::TextEdit::multiline(note)
                         .hint_text("Add investigation notes here…")
@@ -1788,7 +2003,7 @@ impl SysTraceApp {
     fn render_stats_window(&mut self, ctx: &egui::Context) {
         use crate::panels::{event_color, event_label};
 
-        let mut open = self.state.show_stats;
+        let mut open = self.tabs[self.active_tab].state.show_stats;
 
         egui::Window::new("Statistics")
             .open(&mut open)
@@ -1796,15 +2011,15 @@ impl SysTraceApp {
             .default_width(460.0)
             .default_height(560.0)
             .show(ctx, |ui| {
-                let rodeo = self.state.rodeo.clone();
+                let rodeo = self.tabs[self.active_tab].state.rodeo.clone();
 
                 // ── Determine host filter ─────────────────────────────────
-                let host_filter = self.state.selected_host.as_deref();
+                let host_filter = self.tabs[self.active_tab].state.selected_host.as_deref();
 
                 // ── Collect filtered events ───────────────────────────────
-                let total_events = self.state.event_store.len();
+                let total_events = self.tabs[self.active_tab].state.event_store.len();
                 let filtered_events: Vec<&systrace_core::SysmonEvent> = self
-                    .state
+                    .tabs[self.active_tab].state
                     .event_store
                     .events
                     .iter()
@@ -1847,7 +2062,7 @@ impl SysTraceApp {
                     std::collections::BTreeMap::new();
                 let mut integrity_counts: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
-                for node in self.state.process_tree.nodes.values() {
+                for node in self.tabs[self.active_tab].state.process_tree.nodes.values() {
                     if let Some(host) = host_filter {
                         if node.computer != host {
                             continue;
@@ -1866,7 +2081,7 @@ impl SysTraceApp {
                     let proc_count = if host_filter.is_some() {
                         user_counts.values().sum::<usize>()
                     } else {
-                        self.state.process_tree.nodes.values()
+                        self.tabs[self.active_tab].state.process_tree.nodes.values()
                             .filter(|n| !n.is_synthetic).count()
                     };
                     let event_types_seen = event_id_counts.len();
@@ -2027,7 +2242,7 @@ impl SysTraceApp {
                 });
             });
 
-        self.state.show_stats = open;
+        self.tabs[self.active_tab].state.show_stats = open;
     }
 
     // -----------------------------------------------------------------------
@@ -2035,7 +2250,7 @@ impl SysTraceApp {
     // -----------------------------------------------------------------------
 
     fn render_help_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.state.show_help;
+        let mut open = self.tabs[self.active_tab].state.show_help;
         egui::Window::new("Help")
             .open(&mut open)
             .resizable(true)
@@ -2049,22 +2264,22 @@ impl SysTraceApp {
                         (HelpTab::KeyboardShortcuts, "Keyboard Shortcuts"),
                         (HelpTab::FeatureGuide, "Feature Guide"),
                     ] {
-                        if ui.selectable_label(self.state.help_tab == tab, label).clicked() {
-                            self.state.help_tab = tab;
+                        if ui.selectable_label(self.tabs[self.active_tab].state.help_tab == tab, label).clicked() {
+                            self.tabs[self.active_tab].state.help_tab = tab;
                         }
                     }
                 });
                 ui.separator();
 
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-                    match self.state.help_tab {
+                    match self.tabs[self.active_tab].state.help_tab {
                         HelpTab::ColorGuide => self.render_help_color_guide(ui),
                         HelpTab::KeyboardShortcuts => self.render_help_shortcuts(ui),
                         HelpTab::FeatureGuide => self.render_help_feature_guide(ui),
                     }
                 });
             });
-        self.state.show_help = open;
+        self.tabs[self.active_tab].state.show_help = open;
     }
 
     fn render_help_color_guide(&self, ui: &mut egui::Ui) {
@@ -2220,23 +2435,47 @@ impl SysTraceApp {
              (top 12), Event Type Breakdown (top 20), and Host breakdown (if multi-host). \
              Stats respect the current host filter.");
 
-        section(ui, "Export (File menu)",
-            "Events as CSV — all events with time, EventID, type, computer, image, user. \
-             Events as JSON — same data as JSON array. \
-             Process Tree as DOT — Graphviz dot file for visualisation.");
+        section(ui, "Export Timeline",
+            "In the Timeline tab, click Export CSV… to save the current timeline (with any active row filter applied) as a CSV file.");
     }
 }
 
 impl eframe::App for SysTraceApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Apply theme
-        if self.state.dark_mode {
+        // Sync time_range_filter for the active tab at the start of each frame.
+        if !self.tabs.is_empty() {
+            let a = self.active_tab;
+            let s = &self.tabs[a].state;
+            self.tabs[a].state.time_range_filter =
+                if s.time_filter_active && !s.available_dates.is_empty() {
+                    use chrono::{NaiveTime, TimeZone};
+                    let n = s.available_dates.len();
+                    let fi = s.time_filter_from_date_idx.min(n - 1);
+                    let ti = s.time_filter_to_date_idx.min(n - 1);
+                    let from_date = s.available_dates[fi];
+                    let to_date   = s.available_dates[ti];
+                    let from_t = NaiveTime::from_hms_opt(s.time_filter_from_hm.0, s.time_filter_from_hm.1, 0)
+                        .unwrap_or_default();
+                    let to_t = NaiveTime::from_hms_opt(s.time_filter_to_hm.0, s.time_filter_to_hm.1, 59)
+                        .unwrap_or_else(|| NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+                    Some((
+                        chrono::Utc.from_utc_datetime(&from_date.and_time(from_t)),
+                        chrono::Utc.from_utc_datetime(&to_date.and_time(to_t)),
+                    ))
+                } else {
+                    None
+                };
+        }
+
+        // Apply theme (from active tab, or default dark).
+        let dark = self.tabs.get(self.active_tab).map(|t| t.state.dark_mode).unwrap_or(false);
+        if dark {
             ctx.set_visuals(egui::Visuals::dark());
         } else {
             ctx.set_visuals(egui::Visuals::light());
         }
 
-        // Drag-and-drop file loading
+        // Drag-and-drop → new tab.
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if let Some(file) = dropped.into_iter().find(|f| f.path.is_some()) {
             if let Some(path) = file.path {
@@ -2244,35 +2483,51 @@ impl eframe::App for SysTraceApp {
             }
         }
 
-        // Poll background loading channel
+        // Poll loading channels for all tabs.
         self.poll_loading();
 
-        // Request continuous repaints while loading so the progress bar updates
-        if self.rx.is_some() || self.state.loading_progress.is_some() {
+        // Repaint while any tab is loading.
+        let any_loading = self.tabs.iter().any(|t| t.rx.is_some() || t.state.loading_progress.is_some());
+        if any_loading {
             ctx.request_repaint();
         }
 
-        // Menu bar
+        // Menu bar.
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             self.render_menu(ui, ctx);
         });
 
-        // Stats popup (floating)
-        if self.state.show_stats {
-            self.render_stats_window(ctx);
+        // Tab bar (only when at least one tab is open).
+        if !self.tabs.is_empty() {
+            egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+                self.render_tab_bar(ui);
+            });
         }
 
-        // Help window (floating)
-        if self.state.show_help {
-            self.render_help_window(ctx);
-        }
-
-        // Status bar (registered first so it appears at the very bottom)
+        // Status bar (bottom).
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             self.render_status_bar(ui);
         });
 
-        // Process tree (left side panel)
+        // If no tabs are open, show empty central panel and stop.
+        if self.tabs.is_empty() {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No file loaded — use File › Open or drag a file here.");
+                });
+            });
+            return;
+        }
+
+        // Floating windows (only when a tab is open).
+        if self.tabs[self.active_tab].state.show_stats {
+            self.render_stats_window(ctx);
+        }
+        if self.tabs[self.active_tab].state.show_help {
+            self.render_help_window(ctx);
+        }
+
+        // Process tree (left panel).
         egui::SidePanel::left("process_tree_panel")
             .resizable(true)
             .default_width(300.0)
@@ -2281,7 +2536,7 @@ impl eframe::App for SysTraceApp {
                 self.render_process_tree_panel(ui);
             });
 
-        // Telemetry panel (central)
+        // Telemetry panel (central).
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_telemetry_panel(ui);
         });

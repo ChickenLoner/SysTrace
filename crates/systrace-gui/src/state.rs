@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
-use systrace_core::{EventStore, ProcessGuid, ProcessTree, Timestamp};
+use systrace_core::{EventStore, ProcessGuid, ProcessTree, SigmaMatch, SigmaRule, Timestamp};
 
 use crate::panels::TabState;
 
@@ -68,6 +68,7 @@ pub enum TelemetryTab {
     Injection,
     DriversModules,
     Detection,
+    Sigma,
     Timeline,
 }
 
@@ -135,6 +136,18 @@ pub struct AppState {
     pub rodeo: SharedRodeo,
     /// Active time range filter for telemetry tables (None = no filter).
     pub time_range_filter: Option<(Timestamp, Timestamp)>,
+    /// Unique dates found in the loaded file, sorted ascending.
+    pub available_dates: Vec<chrono::NaiveDate>,
+    /// Whether the time range filter is active.
+    pub time_filter_active: bool,
+    /// From: index into `available_dates`.
+    pub time_filter_from_date_idx: usize,
+    /// From: (hour, minute).
+    pub time_filter_from_hm: (u32, u32),
+    /// To: index into `available_dates`.
+    pub time_filter_to_date_idx: usize,
+    /// To: (hour, minute).
+    pub time_filter_to_hm: (u32, u32),
     // ── Phase 5 additions ────────────────────────────────────────────────────
     /// Currently selected host filter (None = show all hosts).
     pub selected_host: Option<String>,
@@ -155,6 +168,17 @@ pub struct AppState {
     pub tab_timeline: TabState,
     /// Text filter for the timeline event table rows.
     pub timeline_event_filter: String,
+    // ── Sigma detection ───────────────────────────────────────────────────────
+    /// User-imported sigma rules (empty until user loads rules).
+    pub sigma_rules: Vec<SigmaRule>,
+    /// Display label: e.g. "3 rules from /path/to/folder" or empty.
+    pub sigma_rules_label: String,
+    /// Sigma rule matches computed after file load.
+    pub sigma_matches: Vec<SigmaMatch>,
+    /// ProcessGuids that have at least one sigma match (for tree badges).
+    pub sigma_match_guids: HashSet<ProcessGuid>,
+    /// Sort/selection state for the sigma panel.
+    pub tab_sigma: TabState,
 }
 
 impl Default for AppState {
@@ -191,6 +215,12 @@ impl Default for AppState {
             scroll_to_selected: false,
             rodeo: systrace_core::new_rodeo(),
             time_range_filter: None,
+            available_dates: Vec::new(),
+            time_filter_active: false,
+            time_filter_from_date_idx: 0,
+            time_filter_from_hm: (0, 0),
+            time_filter_to_date_idx: 0,
+            time_filter_to_hm: (23, 59),
             selected_host: None,
             dark_mode: true,
             bookmarks: HashMap::new(),
@@ -200,6 +230,11 @@ impl Default for AppState {
             timeline_generated: false,
             tab_timeline: TabState::default(),
             timeline_event_filter: String::new(),
+            sigma_rules: Vec::new(),
+            sigma_rules_label: String::new(),
+            sigma_matches: Vec::new(),
+            sigma_match_guids: HashSet::new(),
+            tab_sigma: TabState::default(),
         }
     }
 }

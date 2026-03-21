@@ -34,23 +34,51 @@ impl TimelineRow {
 }
 
 // ---------------------------------------------------------------------------
-// Public render function
+// CSV Export
 // ---------------------------------------------------------------------------
 
-pub fn render_timeline_table(
-    ui: &mut egui::Ui,
+pub fn export_timeline_csv(
+    path: &std::path::Path,
     event_store: &EventStore,
     process_tree: &ProcessTree,
     rodeo: &SharedRodeo,
     event_indices: &[usize],
-    tab: &mut TabState,
     filter: &str,
-) {
-    if event_indices.is_empty() {
-        render_empty(ui, "No events. Select processes and click Generate Timeline.");
-        return;
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "Time,Process,PID,EventID,Type,Details")?;
+    let rows = build_rows(event_store, process_tree, rodeo, event_indices, filter);
+    for r in &rows {
+        writeln!(
+            f,
+            "{},{},{},{},{},{}",
+            csv_escape(&fmt_time(r.time)),
+            csv_escape(&r.process_name),
+            csv_escape(&r.pid),
+            r.event_id,
+            csv_escape(&r.event_type),
+            csv_escape(&r.detail),
+        )?;
     }
+    Ok(())
+}
 
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_owned()
+    }
+}
+
+fn build_rows(
+    event_store: &EventStore,
+    process_tree: &ProcessTree,
+    rodeo: &SharedRodeo,
+    event_indices: &[usize],
+    filter: &str,
+) -> Vec<TimelineRow> {
     let mut rows: Vec<TimelineRow> = event_indices
         .iter()
         .copied()
@@ -84,11 +112,32 @@ pub fn render_timeline_table(
             })
         })
         .collect();
-
     if !filter.is_empty() {
         let f = filter.to_lowercase();
         rows.retain(|r| r.copy_text().to_lowercase().contains(&f));
     }
+    rows
+}
+
+// ---------------------------------------------------------------------------
+// Public render function
+// ---------------------------------------------------------------------------
+
+pub fn render_timeline_table(
+    ui: &mut egui::Ui,
+    event_store: &EventStore,
+    process_tree: &ProcessTree,
+    rodeo: &SharedRodeo,
+    event_indices: &[usize],
+    tab: &mut TabState,
+    filter: &str,
+) {
+    if event_indices.is_empty() {
+        render_empty(ui, "No events. Select processes and click Generate Timeline.");
+        return;
+    }
+
+    let mut rows = build_rows(event_store, process_tree, rodeo, event_indices, filter);
     if rows.is_empty() {
         render_empty(ui, "No matching events.");
         return;
