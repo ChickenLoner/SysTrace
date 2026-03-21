@@ -13,9 +13,11 @@ A fast, native GUI forensic analysis tool for **Sysmon** logs. Opens raw `.evtx`
 ## Features
 
 - **Three input formats** — `.evtx` (native binary), EVTXECmd NDJSON, or EVTXECmd CSV — all auto-detected on open, no configuration needed
+- **Multi-file tabs** — open multiple Sysmon log files simultaneously, each in its own tab; switch investigations without closing the current file
 - **Interactive process tree** — full parent/child hierarchy from Sysmon EventId 1, with color coding for injection targets, SYSTEM processes, terminated processes, and synthetic placeholders
 - **9 telemetry tabs** per process — Overview, Network, Files, Registry, Pipes, Injection, Modules, Detection, Timeline
-- **Cross-process timeline** — select multiple processes, generate a unified time-sorted event table
+- **Cross-process timeline** — select multiple processes, generate a unified time-sorted event table; export to CSV
+- **Sigma rule engine** — load `.yml` Sigma rules or entire rule folders; matching processes flagged in the tree and surfaced in the Detection tab
 - **Forensic filters** — Integrity Level, User, Network Activity, Persistence Activity, and MITRE ATT&CK technique filters; all AND-logic with badge count
 - **Detection tab** — surfaces EventIds 2, 4, 9, 16, 19–21, 24 that are invisible elsewhere, color-coded by category
 - **MITRE ATT&CK** — technique IDs parsed from RuleName, shown as columns in every table and as a tree filter
@@ -218,10 +220,12 @@ crates/
 
 **Key decisions:**
 - **egui** (immediate mode) — virtual scrolling handles 1M+ events without DOM overhead
-- **Auto-detecting parser** — reads magic bytes and first line: `ElfFile\0` → native EVTX binary parser; `{` → NDJSON parser; `RecordNumber,...` header → CSV parser
+- **Multi-tab UI** — each open file lives in an independent `FileTab` with its own state, process tree, event store, and loading channel
+- **Auto-detecting parser** — reads magic bytes and first line (BOM-stripped): `ElfFile\0` → native EVTX binary parser; `{` → NDJSON parser; `RecordNumber,...` header → CSV parser
 - **Native EVTX parser** — pure Rust BinXml decoder with template caching and substitution resolution; no EVTXECmd dependency
 - **Two-phase parsing (NDJSON)** — top-level EVTXECmd fields first, then the inner `Payload` JSON string for `EventData.Data[]`
 - **Indexed EventStore** — events indexed by ProcessGuid, EventId, and target process at ingestion; no on-demand linear scans
+- **Sigma engine** — pure-Rust rule loader and matcher in `systrace-core::sigma`; rules loaded at runtime from `.yml` files, evaluated against the EventStore after ingestion
 - **Background ingestion** — file parsing runs on a background thread; batches of 500 events sent over a crossbeam channel to keep the UI responsive
 - **ProcessGuid as primary key** — PIDs are reused; GUIDs are stored as `[u8; 16]` with FxHashMap for fast lookup
 
