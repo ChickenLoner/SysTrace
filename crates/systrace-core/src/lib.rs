@@ -3,6 +3,7 @@ pub mod event_store;
 pub mod evtx;
 pub mod parser;
 pub mod process_tree;
+pub mod sigma;
 pub mod types;
 
 // Convenience re-exports
@@ -11,6 +12,7 @@ pub use event_store::EventStore;
 pub use parser::{parse_file, parse_file_auto, parse_csv_file};
 pub use process_tree::{ProcessNode, ProcessTree};
 pub use types::{MitreTechnique, ParseError, ProcessGuid, Timestamp, parse_guid, parse_guid_opt, parse_mitre_rule_name};
+pub use sigma::{SigmaRule, SigmaLevel, SigmaMatch, evaluate_rules};
 
 // String interning re-exports
 pub use lasso::Spur;

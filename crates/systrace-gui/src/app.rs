@@ -55,6 +55,24 @@ impl Default for SysTraceApp {
     }
 }
 
+/// Recursively collect .yml/.yaml files under `dir`.
+fn collect_sigma_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(collect_sigma_files(&path));
+            } else if let Some(ext) = path.extension() {
+                if ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Draw a horizontal bar chart for stats sections.
 /// A small metric card: coloured big number + muted label below.
 fn stat_card(ui: &mut egui::Ui, value: &str, label: &str, color: egui::Color32) {
@@ -142,6 +160,36 @@ impl SysTraceApp {
         self.state.tab_pipes.selected_row = None;
         self.state.tab_injection.selected_row = None;
         self.state.tab_drivers.selected_row = None;
+    }
+
+    // -----------------------------------------------------------------------
+    // Sigma rule loading
+    // -----------------------------------------------------------------------
+
+    /// Parse sigma rules from an iterator of file paths, append to `sigma_rules`,
+    /// then re-run evaluation if a log file is already loaded.
+    fn load_sigma_rules_from_paths(&mut self, paths: impl Iterator<Item = PathBuf>) {
+        self.state.sigma_rules.clear();
+        for path in paths {
+            if let Ok(yaml) = std::fs::read_to_string(&path) {
+                match systrace_core::SigmaRule::from_yaml(&yaml) {
+                    Ok(rule) => self.state.sigma_rules.push(rule),
+                    Err(e) => tracing::warn!("Failed to parse {}: {e}", path.display()),
+                }
+            }
+        }
+        // Re-evaluate against loaded events
+        if self.state.file_metadata.is_some() {
+            self.state.sigma_matches = systrace_core::evaluate_rules(
+                &self.state.sigma_rules,
+                &self.state.event_store,
+                &self.state.rodeo,
+            );
+            self.state.sigma_match_guids = self.state.sigma_matches
+                .iter()
+                .filter_map(|m| m.process_guid)
+                .collect();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -307,6 +355,33 @@ impl SysTraceApp {
             time_range,
             computer_names,
         });
+
+        // Collect unique dates from all events.
+        {
+            let mut date_set = std::collections::BTreeSet::new();
+            for ev in &self.state.event_store.events {
+                date_set.insert(ev.time_created.date_naive());
+            }
+            self.state.available_dates = date_set.into_iter().collect();
+        }
+        let last_idx = self.state.available_dates.len().saturating_sub(1);
+        self.state.time_filter_active = false;
+        self.state.time_filter_from_date_idx = 0;
+        self.state.time_filter_from_hm = (0, 0);
+        self.state.time_filter_to_date_idx = last_idx;
+        self.state.time_filter_to_hm = (23, 59);
+        self.state.time_range_filter = None;
+
+        // Run sigma rule evaluation against all loaded events.
+        self.state.sigma_matches = systrace_core::evaluate_rules(
+            &self.state.sigma_rules,
+            &self.state.event_store,
+            &self.state.rodeo,
+        );
+        self.state.sigma_match_guids = self.state.sigma_matches
+            .iter()
+            .filter_map(|m| m.process_guid)
+            .collect();
 
         // Collect unique MITRE technique IDs across all events.
         self.state.available_mitre = self
@@ -506,8 +581,9 @@ impl SysTraceApp {
     fn node_passes_event_filter(&self, guid: &ProcessGuid) -> bool {
         let sf = &self.state.special_filter;
         let mitre_active = !self.state.mitre_filter.is_empty();
+        let time_active = self.state.time_filter_active && self.state.time_range_filter.is_some();
 
-        if !sf.any_active() && !mitre_active {
+        if !sf.any_active() && !mitre_active && !time_active {
             return true;
         }
 
@@ -563,6 +639,20 @@ impl SysTraceApp {
                 });
             if !has_match {
                 return false;
+            }
+        }
+
+        // ── Time Range (AND) ─────────────────────────────────────────────────
+        // Synthetic nodes have no known start time — hide them when filter is active.
+        if time_active {
+            if node.is_synthetic {
+                return false;
+            }
+            if let Some((t_from, t_to)) = self.state.time_range_filter {
+                // A process passes only if it was *started* within the range.
+                if node.start_time < t_from || node.start_time > t_to {
+                    return false;
+                }
             }
         }
 
@@ -960,7 +1050,8 @@ impl SysTraceApp {
         {
             let sf_count = self.state.special_filter.active_category_count();
             let mitre_count = if self.state.mitre_filter.is_empty() { 0 } else { 1 };
-            let total_active = sf_count + mitre_count;
+            let time_count = if self.state.time_filter_active { 1 } else { 0 };
+            let total_active = sf_count + mitre_count + time_count;
             let any_active = total_active > 0;
 
             ui.horizontal(|ui| {
@@ -985,6 +1076,7 @@ impl SysTraceApp {
                 if any_active && ui.small_button("✕").clicked() {
                     self.state.special_filter = SpecialFilter::default();
                     self.state.mitre_filter.clear();
+                    self.state.time_filter_active = false;
                 }
             });
 
@@ -1066,6 +1158,77 @@ impl SysTraceApp {
                                     && ui.small_button("Clear All").clicked()
                                 {
                                     self.state.mitre_filter.clear();
+                                }
+                            });
+                    }
+
+                    // ── Time Range ────────────────────────────────────────
+                    if !self.state.available_dates.is_empty() {
+                        let n_dates = self.state.available_dates.len();
+                        egui::CollapsingHeader::new("Time Range")
+                            .default_open(self.state.time_filter_active)
+                            .show(ui, |ui| {
+                                ui.checkbox(&mut self.state.time_filter_active, "Enable");
+                                ui.label(egui::RichText::new("Filters by process start time").small().weak());
+                                if self.state.time_filter_active {
+                                    // Clamp indices to valid range (e.g. after new file load)
+                                    self.state.time_filter_from_date_idx = self.state.time_filter_from_date_idx.min(n_dates - 1);
+                                    self.state.time_filter_to_date_idx   = self.state.time_filter_to_date_idx.min(n_dates - 1);
+
+                                    // From row
+                                    ui.horizontal(|ui| {
+                                        ui.label("From");
+                                        let from_label = self.state.available_dates[self.state.time_filter_from_date_idx]
+                                            .format("%Y-%m-%d").to_string();
+                                        egui::ComboBox::from_id_salt("tf_from_date")
+                                            .selected_text(&from_label)
+                                            .width(110.0)
+                                            .show_ui(ui, |ui| {
+                                                for i in 0..n_dates {
+                                                    let lbl = self.state.available_dates[i].format("%Y-%m-%d").to_string();
+                                                    ui.selectable_value(&mut self.state.time_filter_from_date_idx, i, lbl);
+                                                }
+                                            });
+                                        ui.add(egui::DragValue::new(&mut self.state.time_filter_from_hm.0).range(0..=23).suffix("h"));
+                                        ui.add(egui::DragValue::new(&mut self.state.time_filter_from_hm.1).range(0..=59).suffix("m"));
+                                    });
+
+                                    // To row
+                                    ui.horizontal(|ui| {
+                                        ui.label("To      ");
+                                        let to_label = self.state.available_dates[self.state.time_filter_to_date_idx]
+                                            .format("%Y-%m-%d").to_string();
+                                        egui::ComboBox::from_id_salt("tf_to_date")
+                                            .selected_text(&to_label)
+                                            .width(110.0)
+                                            .show_ui(ui, |ui| {
+                                                for i in 0..n_dates {
+                                                    let lbl = self.state.available_dates[i].format("%Y-%m-%d").to_string();
+                                                    ui.selectable_value(&mut self.state.time_filter_to_date_idx, i, lbl);
+                                                }
+                                            });
+                                        ui.add(egui::DragValue::new(&mut self.state.time_filter_to_hm.0).range(0..=23).suffix("h"));
+                                        ui.add(egui::DragValue::new(&mut self.state.time_filter_to_hm.1).range(0..=59).suffix("m"));
+                                    });
+
+                                    // Enforce from <= to (compare as minutes-since-epoch-day)
+                                    let from_total = self.state.time_filter_from_date_idx as u32 * 1440
+                                        + self.state.time_filter_from_hm.0 * 60
+                                        + self.state.time_filter_from_hm.1;
+                                    let to_total = self.state.time_filter_to_date_idx as u32 * 1440
+                                        + self.state.time_filter_to_hm.0 * 60
+                                        + self.state.time_filter_to_hm.1;
+                                    if from_total > to_total {
+                                        self.state.time_filter_to_date_idx = self.state.time_filter_from_date_idx;
+                                        self.state.time_filter_to_hm = self.state.time_filter_from_hm;
+                                    }
+
+                                    if ui.small_button("Reset").clicked() {
+                                        self.state.time_filter_from_date_idx = 0;
+                                        self.state.time_filter_from_hm = (0, 0);
+                                        self.state.time_filter_to_date_idx = n_dates - 1;
+                                        self.state.time_filter_to_hm = (23, 59);
+                                    }
                                 }
                             });
                     }
@@ -1223,6 +1386,8 @@ impl SysTraceApp {
             .any(|&idx| self.state.event_store.events[idx].mitre_technique.is_some());
         // Bookmark indicator
         let is_bookmarked = self.state.bookmarks.contains_key(&guid);
+        // Sigma match indicator
+        let has_sigma_match = self.state.sigma_match_guids.contains(&guid);
 
         let label = {
             let base = if is_synthetic {
@@ -1232,6 +1397,7 @@ impl SysTraceApp {
             };
             let mut l = base;
             if has_mitre { l = format!("⚑ {l}"); }
+            if has_sigma_match { l = format!("⚠ {l}"); }
             if is_bookmarked { l = format!("🔖 {l}"); }
             l
         };
@@ -1365,6 +1531,7 @@ impl SysTraceApp {
             TelemetryTab::Injection,
             TelemetryTab::DriversModules,
             TelemetryTab::Detection,
+            TelemetryTab::Sigma,
             TelemetryTab::Timeline,
         ];
         let (tab_forward, tab_backward) = ui.ctx().input(|i| {
@@ -1404,9 +1571,29 @@ impl SysTraceApp {
                     self.state.active_tab = tab;
                 }
             }
+            // Sigma tab — show match count badge
+            let sigma_label = if self.state.sigma_matches.is_empty() {
+                "Sigma".to_owned()
+            } else {
+                format!("⚠ Sigma ({})", self.state.sigma_matches.len())
+            };
+            let sigma_color = if !self.state.sigma_matches.is_empty() {
+                egui::Color32::from_rgb(220, 100, 60)
+            } else {
+                ui.style().visuals.text_color()
+            };
+            if ui
+                .selectable_label(
+                    self.state.active_tab == TelemetryTab::Sigma,
+                    egui::RichText::new(sigma_label).color(sigma_color).strong(),
+                )
+                .clicked()
+            {
+                self.state.active_tab = TelemetryTab::Sigma;
+            }
         });
 
-        // Global telemetry filter bar (shown for non-Overview, non-Hunt tabs)
+        // Global telemetry filter bar (shown for non-Overview, non-Timeline tabs)
         if self.state.active_tab != TelemetryTab::Overview
             && self.state.active_tab != TelemetryTab::Timeline
         {
@@ -1419,6 +1606,7 @@ impl SysTraceApp {
                     self.state.telemetry_filter.clear();
                 }
             });
+
         }
 
         ui.separator();
@@ -1546,6 +1734,76 @@ impl SysTraceApp {
                 } else {
                     panels::render_no_selection(ui);
                 }
+            }
+            TelemetryTab::Sigma => {
+                // ── Sigma toolbar ─────────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    if ui.button("📄 Import Rule").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Sigma Rules", &["yml", "yaml"])
+                            .pick_file()
+                        {
+                            self.load_sigma_rules_from_paths(std::iter::once(path.clone()));
+                            self.state.sigma_rules_label = path
+                                .file_name()
+                                .map(|n| format!("{} rule(s) from {}", self.state.sigma_rules.len(), n.to_string_lossy()))
+                                .unwrap_or_default();
+                        }
+                    }
+                    if ui.button("📁 Import Folder").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            let paths = collect_sigma_files(&folder);
+                            let count = paths.len();
+                            self.load_sigma_rules_from_paths(paths.into_iter());
+                            self.state.sigma_rules_label = format!(
+                                "{} rule(s) from {}",
+                                self.state.sigma_rules.len(),
+                                folder.display()
+                            );
+                            let _ = count;
+                        }
+                    }
+                    if !self.state.sigma_rules.is_empty() && ui.button("✕ Clear").clicked() {
+                        self.state.sigma_rules.clear();
+                        self.state.sigma_rules_label.clear();
+                        self.state.sigma_matches.clear();
+                        self.state.sigma_match_guids.clear();
+                    }
+                    if !self.state.sigma_rules_label.is_empty() {
+                        ui.separator();
+                        ui.weak(&self.state.sigma_rules_label);
+                    }
+                });
+                ui.separator();
+
+                // Build process name lookup closure
+                let rodeo = self.state.rodeo.clone();
+                let tree = &self.state.process_tree;
+                let sigma_matches = self.state.sigma_matches.clone();
+                let process_name_fn = |idx: usize| -> String {
+                    let m = &sigma_matches[idx];
+                    m.process_guid
+                        .and_then(|g| tree.get(&g))
+                        .and_then(|n| n.image_name.clone())
+                        .or_else(|| m.process_guid.and_then(|g| tree.get(&g)).and_then(|n| n.image.clone()))
+                        .unwrap_or_else(|| "-".to_owned())
+                };
+                let navigate = panels::sigma::render_sigma(
+                    ui,
+                    &self.state.sigma_matches,
+                    &mut self.state.tab_sigma,
+                    &filter,
+                    time_range,
+                    &process_name_fn,
+                    self.state.sigma_rules.is_empty(),
+                );
+                // Navigate to matched process on click
+                if let Some(match_idx) = navigate {
+                    if let Some(guid) = self.state.sigma_matches[match_idx].process_guid {
+                        self.select_process(guid);
+                    }
+                }
+                drop(rodeo); // appease borrow checker
             }
             TelemetryTab::Timeline => {
                 self.render_timeline_tab(ui);
@@ -2229,6 +2487,27 @@ impl SysTraceApp {
 
 impl eframe::App for SysTraceApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Sync time_range_filter at the very start of each frame so all panels
+        // (sidebar tree AND central panel) see the same up-to-date value.
+        self.state.time_range_filter = if self.state.time_filter_active && !self.state.available_dates.is_empty() {
+            use chrono::{NaiveTime, TimeZone};
+            let n = self.state.available_dates.len();
+            let fi = self.state.time_filter_from_date_idx.min(n - 1);
+            let ti = self.state.time_filter_to_date_idx.min(n - 1);
+            let from_date = self.state.available_dates[fi];
+            let to_date   = self.state.available_dates[ti];
+            let from_t = NaiveTime::from_hms_opt(self.state.time_filter_from_hm.0, self.state.time_filter_from_hm.1, 0)
+                .unwrap_or_default();
+            let to_t = NaiveTime::from_hms_opt(self.state.time_filter_to_hm.0, self.state.time_filter_to_hm.1, 59)
+                .unwrap_or_else(|| NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+            Some((
+                chrono::Utc.from_utc_datetime(&from_date.and_time(from_t)),
+                chrono::Utc.from_utc_datetime(&to_date.and_time(to_t)),
+            ))
+        } else {
+            None
+        };
+
         // Apply theme
         if self.state.dark_mode {
             ctx.set_visuals(egui::Visuals::dark());
